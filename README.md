@@ -13,8 +13,9 @@ Headroom auto-installs on first session start. No manual setup needed (requires 
 
 ## What It Does
 
-- **Auto-compresses** large structured tool results (logs, grep/search output, JSON arrays) without replacing them with CCR retrieval markers
+- **Auto-compresses** large tool results using Headroom's native ContentRouter
 - **`headroom_compress` tool** — LLM can compress any text on demand
+- **`headroom_retrieve` tool** — LLM can expand CCR markers and recover original content
 - **`headroom_stats` tool** — view cumulative compression statistics
 - **`/headroom` command** — toggle, check, setup, clean, or show stats
 - **Status bar** — shows tokens saved in footer
@@ -32,7 +33,7 @@ Headroom auto-installs on first session start. No manual setup needed (requires 
 
 ## Configuration
 
-This package now follows the same general style as `headroom wrap ...`: defaults in code, project config from disk, and `HEADROOM_*` environment variables overriding that config.
+This package now follows the same general style as `headroom wrap ...`: defaults in code, project config from disk, and `HEADROOM_*` environment variables overriding that config. The extension now stays thin and leans on Headroom's native ContentRouter plus CCR instead of maintaining a separate routing policy in the wrapper.
 
 Precedence is:
 1. built-in defaults
@@ -67,12 +68,12 @@ Create `.headroom/pi-extension.json` in your workspace:
 - `HEADROOM_TOOL_PROFILES` — same style as the proxy, e.g. `bash:moderate,read:conservative,mcp_exa_exa_search:aggressive`
 - `HEADROOM_MODE=audit` — disables auto-compression entirely
 
-Profile levels behave like this:
+Profile levels behave like the native Headroom presets used by `headroom wrap` / proxy config:
 
 - `off` — never auto-compress that tool
-- `conservative` — only compress very large results
-- `moderate` — default
-- `aggressive` — compress earlier with lower savings threshold
+- `conservative` — bias Headroom to keep more context
+- `moderate` — default native bias
+- `aggressive` — bias Headroom to compress more aggressively
 
 ## How It Works
 
@@ -143,7 +144,7 @@ pi-headroom/
 
 The extension communicates with Python via a JSON bridge (stdin/stdout). It auto-detects the bundled wheel for the current platform and installs it into a dedicated Python 3.12 venv at `~/.local/share/headroom-venv`.
 
-For Pi specifically, the bridge only auto-compresses formats that can be shrunk inline. Reference docs, markdown help text, and other content that would otherwise collapse into retrieval markers or lossy truncation are passed through unchanged.
+For Pi specifically, the bridge runs as a long-lived helper process so Headroom's in-memory CCR store survives across compression and retrieval tool calls within the session.
 
 ## License
 

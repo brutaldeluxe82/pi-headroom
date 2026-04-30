@@ -24,12 +24,13 @@
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
-import { execFile } from "node:child_process";
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import readline from "node:readline";
 
 const execFileAsync = promisify(execFile);
 
@@ -219,8 +220,6 @@ type CompressionLevel = "off" | "conservative" | "moderate" | "aggressive";
 
 interface ToolProfile {
 	level: CompressionLevel;
-	minTokensToCompress: number;
-	minTokensSaved: number;
 	enabled: boolean;
 }
 
@@ -239,67 +238,119 @@ interface RawConfigFile {
 	autoInstall?: boolean;
 	minTokensToCompress?: number;
 	minTokensSaved?: number;
-	toolProfiles?: Record<string, CompressionLevel | { level?: CompressionLevel; minTokensToCompress?: number; minTokensSaved?: number; enabled?: boolean }>;
+	toolProfiles?: Record<string, CompressionLevel | { level?: CompressionLevel; enabled?: boolean }>;
 }
 
 // ---------------------------------------------------------------------------
 // Python Bridge
 // ---------------------------------------------------------------------------
 
+let bridgeProc: ChildProcessWithoutNullStreams | undefined;
+let bridgeSeq = 0;
+const bridgePending = new Map<number, {
+	resolve: (value: Record<string, unknown>) => void;
+	reject: (error: Error) => void;
+	timer: NodeJS.Timeout;
+}>();
+
+function stopBridgeProcess(): void {
+	if (!bridgeProc) return;
+	bridgeProc.kill();
+	bridgeProc = undefined;
+}
+
+function ensureBridgeProcess(): ChildProcessWithoutNullStreams {
+	if (bridgeProc && !bridgeProc.killed) return bridgeProc;
+
+	const python = findPython();
+	const proc = spawn(python, [BRIDGE_PATH, "--server"], {
+		env: {
+			...process.env,
+			PYTHONWARNINGS: "ignore",
+			TRANSFORMERS_VERBOSITY: "error",
+		},
+	});
+
+	const stdout = readline.createInterface({ input: proc.stdout });
+	stdout.on("line", (line) => {
+		try {
+			const message = JSON.parse(line) as {
+				id?: number;
+				result?: Record<string, unknown>;
+				error?: string;
+			};
+			if (typeof message.id !== "number") return;
+			const pending = bridgePending.get(message.id);
+			if (!pending) return;
+			clearTimeout(pending.timer);
+			bridgePending.delete(message.id);
+			if (message.error) {
+				pending.reject(new Error(message.error));
+				return;
+			}
+			pending.resolve(message.result ?? {});
+		} catch {
+			// Ignore malformed bridge lines. stderr is still available for debugging.
+		}
+	});
+
+	proc.on("close", (code) => {
+		for (const [id, pending] of bridgePending.entries()) {
+			clearTimeout(pending.timer);
+			pending.reject(new Error(`Headroom bridge exited with code ${code ?? "unknown"}`));
+			bridgePending.delete(id);
+		}
+		if (bridgeProc === proc) {
+			bridgeProc = undefined;
+		}
+	});
+
+	proc.on("error", (err) => {
+		for (const [id, pending] of bridgePending.entries()) {
+			clearTimeout(pending.timer);
+			pending.reject(new Error(`Headroom bridge spawn error: ${err.message}`));
+			bridgePending.delete(id);
+		}
+		if (bridgeProc === proc) {
+			bridgeProc = undefined;
+		}
+	});
+
+	bridgeProc = proc;
+	return proc;
+}
+
 async function callBridge(
 	payload: Record<string, unknown>,
 	timeoutMs = 15_000,
 	signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
-	const python = findPython();
-	const payloadJson = JSON.stringify(payload);
+	const proc = ensureBridgeProcess();
+	const id = ++bridgeSeq;
 
 	return new Promise<Record<string, unknown>>((resolve, reject) => {
-		const { spawn } = require("node:child_process");
-		const proc = spawn(python, [BRIDGE_PATH], {
-			env: {
-				...process.env,
-				PYTHONWARNINGS: "ignore",
-				TRANSFORMERS_VERBOSITY: "error",
-			},
-			signal,
-		});
-
-		let stdout = "";
-		let stderr = "";
-		proc.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
-		proc.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
-
 		const timer = setTimeout(() => {
-			proc.kill();
+			bridgePending.delete(id);
 			reject(new Error(`Headroom bridge timed out after ${timeoutMs}ms`));
 		}, timeoutMs);
 
-		proc.on("close", (code: number | null) => {
-			clearTimeout(timer);
-			if (code !== 0) {
-				reject(new Error(
-					`Headroom bridge exited with code ${code}${stderr ? ` | stderr: ${stderr.slice(0, 200)}` : ""}`,
-				));
-				return;
-			}
-			try {
-				resolve(JSON.parse(stdout.trim()));
-			} catch {
-				reject(new Error(
-					`Headroom bridge returned invalid JSON: ${stdout.slice(0, 200)}${stderr ? ` | stderr: ${stderr.slice(0, 200)}` : ""}`,
-				));
-			}
-		});
+		bridgePending.set(id, { resolve, reject, timer });
 
-		proc.on("error", (err: Error) => {
-			clearTimeout(timer);
-			reject(new Error(`Headroom bridge spawn error: ${err.message}`));
-		});
+		if (signal) {
+			signal.addEventListener(
+				"abort",
+				() => {
+					const pending = bridgePending.get(id);
+					if (!pending) return;
+					clearTimeout(pending.timer);
+					bridgePending.delete(id);
+					reject(new Error("Headroom bridge request aborted"));
+				},
+				{ once: true },
+			);
+		}
 
-		// Write payload to stdin and close it so Python's sys.stdin.read() returns
-		proc.stdin.write(payloadJson);
-		proc.stdin.end();
+		proc.stdin.write(`${JSON.stringify({ id, payload })}\n`);
 	});
 }
 
@@ -320,10 +371,10 @@ const DEFAULT_TOOL_LEVELS: Record<string, CompressionLevel> = {
 };
 
 const PROFILE_PRESETS: Record<CompressionLevel, Omit<ToolProfile, "level">> = {
-	off: { enabled: false, minTokensToCompress: Number.MAX_SAFE_INTEGER, minTokensSaved: Number.MAX_SAFE_INTEGER },
-	conservative: { enabled: true, minTokensToCompress: 1000, minTokensSaved: 200 },
-	moderate: { enabled: true, minTokensToCompress: 500, minTokensSaved: 50 },
-	aggressive: { enabled: true, minTokensToCompress: 250, minTokensSaved: 20 },
+	off: { enabled: false },
+	conservative: { enabled: true },
+	moderate: { enabled: true },
+	aggressive: { enabled: true },
 };
 
 function normalizeToolName(name: string): string {
@@ -388,8 +439,6 @@ function parseToolProfiles(
 		}
 		const level = value.level ?? "moderate";
 		next[key] = buildToolProfile(level, {
-			minTokensToCompress: value.minTokensToCompress,
-			minTokensSaved: value.minTokensSaved,
 			enabled: value.enabled,
 		});
 	}
@@ -484,6 +533,7 @@ function fmtTokens(n: number): string {
 // ---------------------------------------------------------------------------
 
 export default function (pi: ExtensionAPI) {
+	process.once("exit", () => stopBridgeProcess());
 	let headroomAvailable = false;
 	let headroomVersion: string | undefined;
 	let hasRustExtension = false;
@@ -644,13 +694,19 @@ export default function (pi: ExtensionAPI) {
 
 		const text = extractTextFromContent(event.content);
 		const estimatedTokens = estimateTokens(text);
-		const minTokensToCompress = Math.max(config.minTokensToCompress, profile.minTokensToCompress);
-		if (estimatedTokens < minTokensToCompress) return undefined;
+		if (estimatedTokens < config.minTokensToCompress) return undefined;
 
 		try {
 			const model = ctx.model?.id ?? "gpt-4o";
 			const result = (await callBridge(
-				{ action: "compress_text", text, model, tool_name: event.toolName },
+				{
+					action: "compress_text",
+					text,
+					model,
+					tool_name: event.toolName,
+					tool_profile_level: profile.level,
+					ccr_enabled: true,
+				},
 				15_000,
 				ctx.signal,
 			)) as unknown as CompressTextResult;
@@ -660,8 +716,7 @@ export default function (pi: ExtensionAPI) {
 				return undefined;
 			}
 
-			const minTokensSaved = Math.max(config.minTokensSaved, profile.minTokensSaved);
-			if (result.tokens_saved < minTokensSaved) return undefined;
+			if (result.tokens_saved < config.minTokensSaved) return undefined;
 
 			recordCompression(
 				result.tokens_before,
@@ -716,6 +771,9 @@ export default function (pi: ExtensionAPI) {
 					action: "compress_text",
 					text: params.text,
 					model: ctx.model?.id ?? "gpt-4o",
+					tool_name: "headroom_compress",
+					tool_profile_level: "aggressive",
+					ccr_enabled: true,
 					target_ratio: params.target_ratio,
 				},
 				30_000,
@@ -751,6 +809,35 @@ export default function (pi: ExtensionAPI) {
 					ratio: result.compression_ratio,
 					transforms: result.transforms_applied,
 				},
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "headroom_retrieve",
+		label: "Headroom Retrieve",
+		description:
+			"Retrieve original uncompressed content from Headroom CCR using the hash shown in compression markers.",
+		promptSnippet: "Retrieve original content from a Headroom compression marker",
+		promptGuidelines: [
+			"Use headroom_retrieve when compressed output includes a marker like 'Retrieve more: hash=...'.",
+		],
+		parameters: Type.Object({
+			hash: Type.String({ description: "Hash from the compression marker." }),
+			query: Type.Optional(Type.String({ description: "Optional search query to filter the retrieved content." })),
+		}),
+		async execute(_toolCallId, params, signal) {
+			const result = await callBridge(
+				{ action: "retrieve", hash: params.hash, query: params.query },
+				15_000,
+				signal,
+			);
+			const content = typeof result.content === "string"
+				? result.content
+				: JSON.stringify(result, null, 2);
+			return {
+				content: [{ type: "text", text: content }],
+				details: result,
 			};
 		},
 	});
@@ -894,6 +981,7 @@ export default function (pi: ExtensionAPI) {
 
 			if (sub === "clean") {
 				const { rm } = await import("node:fs/promises");
+				stopBridgeProcess();
 				await rm(HEADROOM_VENV, { recursive: true, force: true });
 				headroomAvailable = false;
 				ctx.ui.notify("Headroom venv removed", "info");
