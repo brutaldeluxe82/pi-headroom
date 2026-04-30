@@ -281,7 +281,16 @@ async function callBridge(
 // ---------------------------------------------------------------------------
 
 const MIN_COMPRESS_LENGTH = 1500;
-const COMPRESSIBLE_TOOLS = new Set(["bash", "read", "grep", "find", "ls", "headroom_compress"]);
+const COMPRESSIBLE_TOOLS = new Set([
+	// Built-in tools with potentially large text output
+	"bash", "read", "grep", "find", "ls",
+	// MCP tools that return large web/docs results
+	"mcp_exa_exa_search",
+	"mcp_context7_resolve-library-id",
+	"mcp_context7_query-docs",
+	// Self-reference (manual compression)
+	"headroom_compress",
+]);
 
 function extractTextFromContent(
 	content: Array<{ type: string; text?: string }>,
