@@ -1,49 +1,42 @@
-# Pi Package: Headroom
+# pi-headroom
 
-Context compression for LLM agents — integrates [Headroom AI](https://github.com/chopratejas/headroom) with Pi.
+[Headroom AI](https://github.com/chopratejas/headroom) context compression for Pi — automatically compresses tool outputs to save 40–90% of tokens without losing accuracy.
 
-## One-Command Install
+## Install
 
 ```bash
 pi install git:github.com/brutaldeluxe82/pi-headroom
 /reload
 ```
 
-Headroom auto-installs on first session start. No manual setup needed (requires `uv` and Python 3.12+ on PATH).
+Headroom auto-installs on first session start (requires `uv` and Python 3.12 on PATH). No manual setup needed.
 
-## What It Does
+## What it does
 
-- **Auto-compresses** large tool results using Headroom's native ContentRouter
-- **`headroom_compress` tool** — LLM can compress any text on demand
-- **`headroom_retrieve` tool** — LLM can expand CCR markers and recover original content
-- **`headroom_stats` tool** — view cumulative compression statistics
-- **`/headroom` command** — toggle, check, setup, clean, or show stats
-- **Status bar** — shows tokens saved in footer
+**Auto-compresses** tool results before they reach the LLM context window. Every tool output from `bash`, `read`, `grep`, `mcp_exa_exa_search`, `mcp_context7_*`, and others passes through Headroom's compression pipeline:
 
-## Commands
+- **SmartCrusher** (Rust) — JSON/array → compact CSV
+- **ContentRouter** — detect type, route to the right compressor
+- **CacheAligner** — stabilize prefix for better provider cache hits
+- **Kompress-base** — ML text compression for unstructured content
 
-| Command | Description |
-|---------|-------------|
-| `/headroom` | Show quick stats |
-| `/headroom toggle` | Toggle auto-compression on/off |
-| `/headroom check` | Verify installation status |
-| `/headroom config` | Reload and show resolved config |
-| `/headroom setup` | Re-run installation |
-| `/headroom clean` | Remove the headroom venv |
+**Reversible via CCR** — compression is not deletion. The LLM can call `headroom_retrieve` to pull original bytes from any compression marker.
+
+## Registered tools
+
+| Tool | Purpose |
+|------|---------|
+| `headroom_compress` | Compress text to reduce token count while preserving meaning |
+| `headroom_retrieve` | Retrieve original uncompressed content from a CCR hash |
+| `headroom_stats` | View cumulative compression statistics for the current session |
+
+## Registered command
+
+`/headroom` — subcommands: `toggle`, `check`, `setup`, `reload`, `clean`, or show stats.
 
 ## Configuration
 
-This package now follows the same general style as `headroom wrap ...`: defaults in code, project config from disk, and `HEADROOM_*` environment variables overriding that config. The extension now stays thin and leans on Headroom's native ContentRouter plus CCR instead of maintaining a separate routing policy in the wrapper.
-
-Precedence is:
-1. built-in defaults
-2. `.headroom/pi-extension.json`
-3. environment variables such as `HEADROOM_TOOL_PROFILES` and `HEADROOM_MIN_TOKENS`
-4. runtime `/headroom toggle` for the current session only
-
-### Project config file
-
-Create `.headroom/pi-extension.json` in your workspace:
+Config file: `.headroom/pi-extension.json` in the workspace directory.
 
 ```json
 {
@@ -61,59 +54,49 @@ Create `.headroom/pi-extension.json` in your workspace:
 
 ### Environment variables
 
-- `HEADROOM_OPTIMIZE` or `HEADROOM_PI_AUTO_COMPRESS` — master on/off switch
-- `HEADROOM_PI_AUTO_INSTALL` — allow or block automatic venv setup
-- `HEADROOM_MIN_TOKENS` or `HEADROOM_PI_MIN_TOKENS` — global minimum size before auto-compress runs
-- `HEADROOM_PI_MIN_TOKENS_SAVED` — minimum savings required before replacing tool output
-- `HEADROOM_TOOL_PROFILES` — same style as the proxy, e.g. `bash:moderate,read:conservative,mcp_exa_exa_search:aggressive`
-- `HEADROOM_MODE=audit` — disables auto-compression entirely
+| Variable | Purpose |
+|----------|---------|
+| `HEADROOM_OPTIMIZE` / `HEADROOM_PI_AUTO_COMPRESS` | Master on/off switch |
+| `HEADROOM_PI_AUTO_INSTALL` | Allow or block automatic venv setup |
+| `HEADROOM_PI_MIN_TOKENS` / `HEADROOM_MIN_TOKENS` | Global minimum size before auto-compress runs |
+| `HEADROOM_PI_MIN_TOKENS_SAVED` | Minimum savings required before replacing tool output |
+| `HEADROOM_TOOL_PROFILES` | Per-tool profiles, e.g. `bash:moderate,read:conservative` |
+| `HEADROOM_MODE=audit` | Disables auto-compression |
 
-Profile levels behave like the native Headroom presets used by `headroom wrap` / proxy config:
+### Tool profile levels
 
-- `off` — never auto-compress that tool
-- `conservative` — bias Headroom to keep more context
-- `moderate` — default native bias
-- `aggressive` — bias Headroom to compress more aggressively
+| Level | Behaviour |
+|-------|-----------|
+| `off` | Never auto-compress that tool |
+| `conservative` | Keep more context |
+| `moderate` | Default balance |
+| `aggressive` | Compress more aggressively |
 
-## How It Works
+## Architecture
 
 ```
-User prompt → Pi agent → Tool call (bash, read, grep...)
-                              │
-                              ▼
-                        tool_result event
-                              │
-                   ┌──────────┴──────────┐
-                   │  Is result >1500     │
-                   │  chars & not error?  │
-                   └──────────┬──────────┘
-                              │ Yes
-                              ▼
-              Python bridge → headroom.compress()
-                              │
-                              ▼
-                  SmartCrusher (Rust) ─ JSON/array → compact CSV
-                  ContentRouter        ─ detect type, route
-                  CacheAligner         ─ stabilize prefix
-                  Kompress-base        ─ ML text compression
-                              │
-                              ▼
-                  Compressed result → back to LLM context
-                              │
-                              ▼
-              Status bar: "↓ 3.8K tok saved (44%)"
+pi-headroom/
+├── package.json
+├── extensions/
+│   └── index.ts          # Pi extension — tool hooks, auto-compress, status bar
+├── python/
+│   └── headroom_bridge.py  # Long-lived Python process (stdin/stdout JSON bridge)
+└── wheels/
+    └── headroom_core_py-*.whl  # Bundled Rust SmartCrusher wheel (Linux x86_64)
 ```
+
+The extension communicates with Python via a JSON bridge over stdin/stdout. It runs as a long-lived helper process so Headroom's in-memory CCR store survives across compression and retrieval calls within the session.
+
+On startup, the extension auto-detects a bundled wheel for the current platform and installs it into a dedicated Python 3.12 venv at `~/.local/share/headroom-venv`.
 
 ## Requirements
 
 - **Python 3.12** (required by PyO3 — Python 3.14 is not yet supported)
 - **uv** (for venv creation and pip install)
-- **Bundled wheel** for Linux x86_64 (macOS wheels: build from source or contribute!)
 
-On Linux x86_64, the pre-built Rust SmartCrusher wheel is bundled — no Rust toolchain needed.
-On other platforms, Headroom runs without the Rust extension (limited to non-SmartCrusher compression).
+On Linux x86_64, the pre-built Rust SmartCrusher wheel is bundled — no Rust toolchain needed. Headroom runs without the Rust extension (limited to non-SmartCrusher compression).
 
-## Adding Platform Wheels
+## Adding platform wheels
 
 To add a wheel for macOS ARM64:
 
@@ -123,29 +106,10 @@ git clone https://github.com/chopratejas/headroom.git
 cd headroom
 maturin build -m crates/headroom-py/Cargo.toml --release --interpreter python3.12
 
-# Copy the wheel to the package:
+# Copy wheel into the package:
 cp target/wheels/headroom_core_py-*.whl pi-headroom/wheels/
-
-# Commit and push
 ```
-
-## Architecture
-
-```
-pi-headroom/
-├── package.json          # Pi package manifest
-├── extensions/
-│   └── index.ts          # Pi extension (hooks, tools, commands)
-├── python/
-│   └── headroom_bridge.py # JSON stdin/stdout bridge to Python
-└── wheels/
-    └── headroom_core_py-0.1.0-cp312-cp312-manylinux_2_38_x86_64.whl
-```
-
-The extension communicates with Python via a JSON bridge (stdin/stdout). It auto-detects the bundled wheel for the current platform and installs it into a dedicated Python 3.12 venv at `~/.local/share/headroom-venv`.
-
-For Pi specifically, the bridge runs as a long-lived helper process so Headroom's in-memory CCR store survives across compression and retrieval tool calls within the session.
 
 ## License
 
-Apache 2.0 — Headroom is Apache 2.0, this package follows suit.
+Apache 2.0
