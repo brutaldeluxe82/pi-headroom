@@ -37,9 +37,12 @@ const execFileAsync = promisify(execFile);
 // Paths
 // ---------------------------------------------------------------------------
 
+// import.meta.url points to extensions/index.ts, so dirname gives extensions/.
+// The bridge and wheels live at the package root (one level up).
 const EXT_DIR = dirname(fileURLToPath(import.meta.url));
-const BRIDGE_PATH = resolve(EXT_DIR, "python", "headroom_bridge.py");
-const WHEELS_DIR = resolve(EXT_DIR, "wheels");
+const PKG_DIR = resolve(EXT_DIR, "..");
+const BRIDGE_PATH = resolve(PKG_DIR, "python", "headroom_bridge.py");
+const WHEELS_DIR = resolve(PKG_DIR, "wheels");
 
 /**
  * The headroom venv lives at ~/.local/share/headroom-venv.
