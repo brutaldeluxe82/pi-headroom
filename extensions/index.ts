@@ -225,24 +225,55 @@ async function callBridge(
 	signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
 	const python = findPython();
-	const { stdout } = await execFileAsync(python, [BRIDGE_PATH], {
-		input: JSON.stringify(payload),
-		timeout: timeoutMs,
-		signal,
-		env: {
-			...process.env,
-			PYTHONWARNINGS: "ignore",
-			TRANSFORMERS_VERBOSITY: "error",
-		},
-		maxBuffer: 10 * 1024 * 1024,
+	const payloadJson = JSON.stringify(payload);
+
+	return new Promise<Record<string, unknown>>((resolve, reject) => {
+		const { spawn } = require("node:child_process");
+		const proc = spawn(python, [BRIDGE_PATH], {
+			env: {
+				...process.env,
+				PYTHONWARNINGS: "ignore",
+				TRANSFORMERS_VERBOSITY: "error",
+			},
+			signal,
+		});
+
+		let stdout = "";
+		let stderr = "";
+		proc.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+		proc.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+
+		const timer = setTimeout(() => {
+			proc.kill();
+			reject(new Error(`Headroom bridge timed out after ${timeoutMs}ms`));
+		}, timeoutMs);
+
+		proc.on("close", (code: number | null) => {
+			clearTimeout(timer);
+			if (code !== 0) {
+				reject(new Error(
+					`Headroom bridge exited with code ${code}${stderr ? ` | stderr: ${stderr.slice(0, 200)}` : ""}`,
+				));
+				return;
+			}
+			try {
+				resolve(JSON.parse(stdout.trim()));
+			} catch {
+				reject(new Error(
+					`Headroom bridge returned invalid JSON: ${stdout.slice(0, 200)}${stderr ? ` | stderr: ${stderr.slice(0, 200)}` : ""}`,
+				));
+			}
+		});
+
+		proc.on("error", (err: Error) => {
+			clearTimeout(timer);
+			reject(new Error(`Headroom bridge spawn error: ${err.message}`));
+		});
+
+		// Write payload to stdin and close it so Python's sys.stdin.read() returns
+		proc.stdin.write(payloadJson);
+		proc.stdin.end();
 	});
-	try {
-		return JSON.parse(stdout.trim());
-	} catch {
-		throw new Error(
-			`Headroom bridge returned invalid JSON: ${stdout.slice(0, 200)}`,
-		);
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -343,9 +374,10 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		// Quick check: is headroom already installed?
 		try {
+			ctx.ui.notify(`Headroom: checking bridge...`, "info");
 			const result = (await callBridge(
 				{ action: "check" },
-				5_000,
+				15_000,
 			)) as unknown as CheckResult;
 
 			if (result.installed) {
@@ -384,7 +416,7 @@ export default function (pi: ExtensionAPI) {
 					}
 				}
 			}
-		} catch {
+		} catch (err) {
 			// Bridge failed — might need auto-install
 			if (!installedThisSession && !existsSync(HEADROOM_VENV)) {
 				installedThisSession = true;
