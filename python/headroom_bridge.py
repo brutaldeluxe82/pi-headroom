@@ -15,6 +15,7 @@ Actions:
 from __future__ import annotations
 
 import json
+import re
 import sys
 import warnings
 from typing import Any
@@ -97,6 +98,10 @@ def handle_check() -> dict[str, Any]:
     }
 
 
+def _strip_ccr_marker(text: str) -> str:
+    return re.sub(r"\s*\[[^\]]*compressed to[^\]]*hash=[a-f0-9]{24}\]", "", text).strip()
+
+
 def handle_compress_text(payload: dict[str, Any]) -> dict[str, Any]:
     """Compress a single text block using native Headroom content routing.
 
@@ -127,16 +132,20 @@ def handle_compress_text(payload: dict[str, Any]) -> dict[str, Any]:
             )
         )
         result = router.compress(text, context=context, bias=profile.bias)
+        compressed_text = result.compressed if ccr_enabled else _strip_ccr_marker(result.compressed)
+        tokens_after = result.total_compressed_tokens if ccr_enabled else _estimate_tokens(compressed_text)
         transforms = [
             f"content_router:{result.strategy_used.value}",
             f"profile:{profile_source}",
         ]
+        if not ccr_enabled:
+            transforms.append("ccr:disabled")
         return {
-            "compressed_text": result.compressed,
+            "compressed_text": compressed_text,
             "tokens_before": result.total_original_tokens,
-            "tokens_after": result.total_compressed_tokens,
-            "tokens_saved": result.tokens_saved,
-            "compression_ratio": result.savings_percentage / 100,
+            "tokens_after": tokens_after,
+            "tokens_saved": max(0, result.total_original_tokens - tokens_after),
+            "compression_ratio": ((result.total_original_tokens - tokens_after) / result.total_original_tokens) if result.total_original_tokens else 0.0,
             "transforms_applied": transforms,
         }
     except Exception as exc:
