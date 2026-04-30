@@ -13,7 +13,7 @@ Headroom auto-installs on first session start. No manual setup needed (requires 
 
 ## What It Does
 
-- **Auto-compresses** large tool results (bash, read, grep, find, ls) — saves 40-90% of tokens
+- **Auto-compresses** large structured tool results (logs, grep/search output, JSON arrays) without replacing them with CCR retrieval markers
 - **`headroom_compress` tool** — LLM can compress any text on demand
 - **`headroom_stats` tool** — view cumulative compression statistics
 - **`/headroom` command** — toggle, check, setup, clean, or show stats
@@ -97,6 +97,8 @@ pi-headroom/
 ```
 
 The extension communicates with Python via a JSON bridge (stdin/stdout). It auto-detects the bundled wheel for the current platform and installs it into a dedicated Python 3.12 venv at `~/.local/share/headroom-venv`.
+
+For Pi specifically, the bridge only auto-compresses formats that can be shrunk inline. Reference docs, markdown help text, and other content that would otherwise collapse into retrieval markers or lossy truncation are passed through unchanged.
 
 ## License
 
