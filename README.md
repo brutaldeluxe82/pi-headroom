@@ -26,8 +26,53 @@ Headroom auto-installs on first session start. No manual setup needed (requires 
 | `/headroom` | Show quick stats |
 | `/headroom toggle` | Toggle auto-compression on/off |
 | `/headroom check` | Verify installation status |
+| `/headroom config` | Reload and show resolved config |
 | `/headroom setup` | Re-run installation |
 | `/headroom clean` | Remove the headroom venv |
+
+## Configuration
+
+This package now follows the same general style as `headroom wrap ...`: defaults in code, project config from disk, and `HEADROOM_*` environment variables overriding that config.
+
+Precedence is:
+1. built-in defaults
+2. `.headroom/pi-extension.json`
+3. environment variables such as `HEADROOM_TOOL_PROFILES` and `HEADROOM_MIN_TOKENS`
+4. runtime `/headroom toggle` for the current session only
+
+### Project config file
+
+Create `.headroom/pi-extension.json` in your workspace:
+
+```json
+{
+  "autoCompress": true,
+  "autoInstall": true,
+  "minTokensToCompress": 500,
+  "minTokensSaved": 50,
+  "toolProfiles": {
+    "bash": "moderate",
+    "read": "conservative",
+    "mcp_exa_exa_search": "aggressive"
+  }
+}
+```
+
+### Environment variables
+
+- `HEADROOM_OPTIMIZE` or `HEADROOM_PI_AUTO_COMPRESS` — master on/off switch
+- `HEADROOM_PI_AUTO_INSTALL` — allow or block automatic venv setup
+- `HEADROOM_MIN_TOKENS` or `HEADROOM_PI_MIN_TOKENS` — global minimum size before auto-compress runs
+- `HEADROOM_PI_MIN_TOKENS_SAVED` — minimum savings required before replacing tool output
+- `HEADROOM_TOOL_PROFILES` — same style as the proxy, e.g. `bash:moderate,read:conservative,mcp_exa_exa_search:aggressive`
+- `HEADROOM_MODE=audit` — disables auto-compression entirely
+
+Profile levels behave like this:
+
+- `off` — never auto-compress that tool
+- `conservative` — only compress very large results
+- `moderate` — default
+- `aggressive` — compress earlier with lower savings threshold
 
 ## How It Works
 

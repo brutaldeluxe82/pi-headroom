@@ -25,8 +25,8 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
 import { execFile } from "node:child_process";
-import { existsSync, readdirSync, mkdirSync } from "node:fs";
-import { resolve, dirname, join } from "node:path";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { resolve, dirname } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -215,6 +215,33 @@ interface CompressTextResult {
 	error?: string;
 }
 
+type CompressionLevel = "off" | "conservative" | "moderate" | "aggressive";
+
+interface ToolProfile {
+	level: CompressionLevel;
+	minTokensToCompress: number;
+	minTokensSaved: number;
+	enabled: boolean;
+}
+
+interface ExtensionConfig {
+	autoCompress: boolean;
+	autoInstall: boolean;
+	minTokensToCompress: number;
+	minTokensSaved: number;
+	toolProfiles: Record<string, ToolProfile>;
+	configPath: string;
+	sourceSummary: string[];
+}
+
+interface RawConfigFile {
+	autoCompress?: boolean;
+	autoInstall?: boolean;
+	minTokensToCompress?: number;
+	minTokensSaved?: number;
+	toolProfiles?: Record<string, CompressionLevel | { level?: CompressionLevel; minTokensToCompress?: number; minTokensSaved?: number; enabled?: boolean }>;
+}
+
 // ---------------------------------------------------------------------------
 // Python Bridge
 // ---------------------------------------------------------------------------
@@ -280,17 +307,154 @@ async function callBridge(
 // Helpers
 // ---------------------------------------------------------------------------
 
-const MIN_COMPRESS_LENGTH = 1500;
-const COMPRESSIBLE_TOOLS = new Set([
-	// Built-in tools with potentially large text output
-	"bash", "read", "grep", "find", "ls",
-	// MCP tools that return large web/docs results
-	"mcp_exa_exa_search",
-	"mcp_context7_resolve-library-id",
-	"mcp_context7_query-docs",
-	// Self-reference (manual compression)
-	"headroom_compress",
-]);
+const DEFAULT_TOOL_LEVELS: Record<string, CompressionLevel> = {
+	bash: "moderate",
+	read: "moderate",
+	grep: "moderate",
+	find: "moderate",
+	ls: "moderate",
+	mcp_exa_exa_search: "moderate",
+	"mcp_context7_resolve-library-id": "moderate",
+	"mcp_context7_query-docs": "moderate",
+	headroom_compress: "moderate",
+};
+
+const PROFILE_PRESETS: Record<CompressionLevel, Omit<ToolProfile, "level">> = {
+	off: { enabled: false, minTokensToCompress: Number.MAX_SAFE_INTEGER, minTokensSaved: Number.MAX_SAFE_INTEGER },
+	conservative: { enabled: true, minTokensToCompress: 1000, minTokensSaved: 200 },
+	moderate: { enabled: true, minTokensToCompress: 500, minTokensSaved: 50 },
+	aggressive: { enabled: true, minTokensToCompress: 250, minTokensSaved: 20 },
+};
+
+function normalizeToolName(name: string): string {
+	return name.trim().toLowerCase();
+}
+
+function parseBool(value: string | undefined, fallback: boolean): boolean {
+	if (value == null || value === "") return fallback;
+	const normalized = value.trim().toLowerCase();
+	if (["1", "true", "yes", "on"].includes(normalized)) return true;
+	if (["0", "false", "no", "off"].includes(normalized)) return false;
+	return fallback;
+}
+
+function parseIntEnv(value: string | undefined, fallback: number): number {
+	if (value == null || value === "") return fallback;
+	const parsed = Number.parseInt(value, 10);
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function estimateTokens(text: string): number {
+	return Math.floor(text.length / 4);
+}
+
+function configFilePath(): string {
+	const workspace = process.env.HEADROOM_WORKSPACE_DIR || process.cwd();
+	return resolve(workspace, ".headroom", "pi-extension.json");
+}
+
+function loadConfigFile(path: string): RawConfigFile | null {
+	if (!existsSync(path)) return null;
+	try {
+		return JSON.parse(readFileSync(path, "utf8")) as RawConfigFile;
+	} catch {
+		return null;
+	}
+}
+
+function buildToolProfile(
+	level: CompressionLevel,
+	overrides?: Partial<Omit<ToolProfile, "level">>,
+): ToolProfile {
+	return {
+		level,
+		...PROFILE_PRESETS[level],
+		...overrides,
+		enabled: overrides?.enabled ?? PROFILE_PRESETS[level].enabled,
+	};
+}
+
+function parseToolProfiles(
+	base: Record<string, ToolProfile>,
+	raw?: RawConfigFile["toolProfiles"],
+): Record<string, ToolProfile> {
+	const next = { ...base };
+	if (!raw) return next;
+	for (const [toolName, value] of Object.entries(raw)) {
+		const key = normalizeToolName(toolName);
+		if (typeof value === "string") {
+			next[key] = buildToolProfile(value);
+			continue;
+		}
+		const level = value.level ?? "moderate";
+		next[key] = buildToolProfile(level, {
+			minTokensToCompress: value.minTokensToCompress,
+			minTokensSaved: value.minTokensSaved,
+			enabled: value.enabled,
+		});
+	}
+	return next;
+}
+
+function parseToolProfilesEnv(
+	base: Record<string, ToolProfile>,
+	envValue: string | undefined,
+): Record<string, ToolProfile> {
+	const next = { ...base };
+	if (!envValue) return next;
+	for (const entry of envValue.split(",").map((e) => e.trim()).filter(Boolean)) {
+		const [toolName, levelRaw] = entry.split(":", 2);
+		const level = (levelRaw?.trim().toLowerCase() || "") as CompressionLevel;
+		if (!toolName || !(level in PROFILE_PRESETS)) continue;
+		next[normalizeToolName(toolName)] = buildToolProfile(level);
+	}
+	return next;
+}
+
+function loadExtensionConfig(): ExtensionConfig {
+	const path = configFilePath();
+	const fileConfig = loadConfigFile(path);
+	const sources: string[] = [];
+
+	const envAutoCompress = process.env.HEADROOM_PI_AUTO_COMPRESS ?? process.env.HEADROOM_OPTIMIZE;
+	const envAutoInstall = process.env.HEADROOM_PI_AUTO_INSTALL;
+	const envMinTokens = process.env.HEADROOM_PI_MIN_TOKENS ?? process.env.HEADROOM_MIN_TOKENS;
+	const envMinSaved = process.env.HEADROOM_PI_MIN_TOKENS_SAVED;
+
+	const mode = (process.env.HEADROOM_MODE || "").trim().toLowerCase();
+	const modeForcesDisable = mode === "audit";
+
+	let toolProfiles: Record<string, ToolProfile> = {};
+	for (const [toolName, level] of Object.entries(DEFAULT_TOOL_LEVELS)) {
+		toolProfiles[normalizeToolName(toolName)] = buildToolProfile(level);
+	}
+	toolProfiles = parseToolProfiles(toolProfiles, fileConfig?.toolProfiles);
+	toolProfiles = parseToolProfilesEnv(toolProfiles, process.env.HEADROOM_TOOL_PROFILES);
+
+	if (fileConfig) sources.push(`file:${path}`);
+	if (process.env.HEADROOM_TOOL_PROFILES) sources.push("env:HEADROOM_TOOL_PROFILES");
+	if (envAutoCompress) sources.push(process.env.HEADROOM_PI_AUTO_COMPRESS ? "env:HEADROOM_PI_AUTO_COMPRESS" : "env:HEADROOM_OPTIMIZE");
+	if (envAutoInstall) sources.push("env:HEADROOM_PI_AUTO_INSTALL");
+	if (envMinTokens) sources.push(process.env.HEADROOM_PI_MIN_TOKENS ? "env:HEADROOM_PI_MIN_TOKENS" : "env:HEADROOM_MIN_TOKENS");
+	if (envMinSaved) sources.push("env:HEADROOM_PI_MIN_TOKENS_SAVED");
+	if (modeForcesDisable) sources.push("env:HEADROOM_MODE=audit");
+
+	return {
+		autoCompress: modeForcesDisable
+			? false
+			: parseBool(envAutoCompress, fileConfig?.autoCompress ?? true),
+		autoInstall: parseBool(envAutoInstall, fileConfig?.autoInstall ?? true),
+		minTokensToCompress: parseIntEnv(envMinTokens, fileConfig?.minTokensToCompress ?? 500),
+		minTokensSaved: parseIntEnv(envMinSaved, fileConfig?.minTokensSaved ?? 50),
+		toolProfiles,
+		configPath: path,
+		sourceSummary: sources,
+	};
+}
+
+function profileForTool(config: ExtensionConfig, toolName: string): ToolProfile | undefined {
+	return config.toolProfiles[normalizeToolName(toolName)];
+}
 
 function extractTextFromContent(
 	content: Array<{ type: string; text?: string }>,
@@ -323,7 +487,8 @@ export default function (pi: ExtensionAPI) {
 	let headroomAvailable = false;
 	let headroomVersion: string | undefined;
 	let hasRustExtension = false;
-	let autoCompress = true;
+	let config = loadExtensionConfig();
+	let autoCompress = config.autoCompress;
 	let installedThisSession = false;
 	const stats: SessionStats = {
 		requests: 0,
@@ -381,9 +546,15 @@ export default function (pi: ExtensionAPI) {
 	// ---- Session lifecycle ----
 
 	pi.on("session_start", async (_event, ctx) => {
+		config = loadExtensionConfig();
+		autoCompress = config.autoCompress;
+
 		// Quick check: is headroom already installed?
 		try {
 			ctx.ui.notify(`Headroom: checking bridge...`, "info");
+			if (config.sourceSummary.length > 0) {
+				ctx.ui.notify(`Headroom config loaded from ${config.sourceSummary.join(", ")}`, "info");
+			}
 			const result = (await callBridge(
 				{ action: "check" },
 				15_000,
@@ -398,14 +569,12 @@ export default function (pi: ExtensionAPI) {
 					`Headroom v${headroomVersion} loaded${rustNote}`,
 					"info",
 				);
-			} else if (!installedThisSession) {
-				// Auto-install on first use
+			} else if (!installedThisSession && config.autoInstall) {
 				installedThisSession = true;
 				ctx.ui.notify("Headroom: first run — installing automatically...", "info");
 
 				const ok = await installHeadroom(ctx.ui, ctx.signal);
 				if (ok) {
-					// Re-check after installation
 					try {
 						const recheck = (await callBridge(
 							{ action: "check" },
@@ -415,19 +584,17 @@ export default function (pi: ExtensionAPI) {
 						headroomVersion = recheck.version;
 						hasRustExtension = recheck.rust_extension ?? false;
 						if (headroomAvailable) {
-							ctx.ui.notify(
-								`Headroom v${headroomVersion} installed ✓`,
-								"success",
-							);
+							ctx.ui.notify(`Headroom v${headroomVersion} installed ✓`, "success");
 						}
 					} catch {
 						ctx.ui.notify("Headroom installed but verification failed", "warning");
 					}
 				}
+			} else if (!config.autoInstall) {
+				ctx.ui.notify("Headroom auto-install disabled by config", "warning");
 			}
-		} catch (err) {
-			// Bridge failed — might need auto-install
-			if (!installedThisSession && !existsSync(HEADROOM_VENV)) {
+		} catch {
+			if (!installedThisSession && !existsSync(HEADROOM_VENV) && config.autoInstall) {
 				installedThisSession = true;
 				ctx.ui.notify("Headroom: not found — setting up...", "info");
 				const ok = await installHeadroom(ctx.ui, ctx.signal);
@@ -441,10 +608,7 @@ export default function (pi: ExtensionAPI) {
 						headroomVersion = recheck.version;
 						hasRustExtension = recheck.rust_extension ?? false;
 						if (headroomAvailable) {
-							ctx.ui.notify(
-								`Headroom v${headroomVersion} installed ✓`,
-								"success",
-							);
+							ctx.ui.notify(`Headroom v${headroomVersion} installed ✓`, "success");
 						}
 					} catch {
 						ctx.ui.notify("Headroom installed but verification failed", "warning");
@@ -452,20 +616,20 @@ export default function (pi: ExtensionAPI) {
 				}
 			} else {
 				ctx.ui.notify(
-					"Headroom: Python not available. Install Python 3.12+ and uv.",
+					config.autoInstall
+						? "Headroom: Python not available. Install Python 3.12+ and uv."
+						: "Headroom: bridge unavailable and auto-install is disabled.",
 					"warning",
 				);
 			}
 		}
 
-		// Reset session stats
 		stats.requests = 0;
 		stats.tokensBefore = 0;
 		stats.tokensAfter = 0;
 		stats.tokensSaved = 0;
 		stats.errors = 0;
 		stats.transformsUsed = {};
-		autoCompress = true;
 
 		refreshStatus(ctx);
 	});
@@ -475,15 +639,18 @@ export default function (pi: ExtensionAPI) {
 	pi.on("tool_result", async (event, ctx) => {
 		if (!headroomAvailable || !autoCompress) return undefined;
 		if (event.isError) return undefined;
-		if (!COMPRESSIBLE_TOOLS.has(event.toolName)) return undefined;
+		const profile = profileForTool(config, event.toolName);
+		if (!profile?.enabled) return undefined;
 
 		const text = extractTextFromContent(event.content);
-		if (text.length < MIN_COMPRESS_LENGTH) return undefined;
+		const estimatedTokens = estimateTokens(text);
+		const minTokensToCompress = Math.max(config.minTokensToCompress, profile.minTokensToCompress);
+		if (estimatedTokens < minTokensToCompress) return undefined;
 
 		try {
 			const model = ctx.model?.id ?? "gpt-4o";
 			const result = (await callBridge(
-				{ action: "compress_text", text, model },
+				{ action: "compress_text", text, model, tool_name: event.toolName },
 				15_000,
 				ctx.signal,
 			)) as unknown as CompressTextResult;
@@ -493,7 +660,8 @@ export default function (pi: ExtensionAPI) {
 				return undefined;
 			}
 
-			if (result.tokens_saved < 50) return undefined;
+			const minTokensSaved = Math.max(config.minTokensSaved, profile.minTokensSaved);
+			if (result.tokens_saved < minTokensSaved) return undefined;
 
 			recordCompression(
 				result.tokens_before,
@@ -605,6 +773,12 @@ export default function (pi: ExtensionAPI) {
 				.map(([name, count]) => `  ${name}: ${count}x`)
 				.join("\n");
 
+			const configuredTools = Object.entries(config.toolProfiles)
+				.filter(([, profile]) => profile.enabled)
+				.map(([name, profile]) => `${name}:${profile.level}`)
+				.sort()
+				.join(", ");
+
 			return {
 				content: [
 					{
@@ -617,13 +791,18 @@ export default function (pi: ExtensionAPI) {
 							`  Tokens saved:  ${fmtTokens(stats.tokensSaved)} (${pct}%)\n` +
 							`  Errors: ${stats.errors}\n` +
 							`  Auto-compress: ${autoCompress ? "on" : "off"}\n` +
+							`  Auto-install: ${config.autoInstall ? "on" : "off"}\n` +
+							`  Min tokens to compress: ${config.minTokensToCompress}\n` +
+							`  Min tokens saved: ${config.minTokensSaved}\n` +
 							`  Rust extension: ${hasRustExtension ? "yes" : "no"}\n` +
 							`  Version: ${headroomVersion ?? "unknown"}\n` +
 							`  Platform wheel: ${findBundledWheel() ? "bundled" : "none"}\n` +
+							`  Config file: ${config.configPath}\n` +
+							`  Tool profiles: ${configuredTools || "none"}\n` +
 							(transforms ? `\nTransforms used:\n${transforms}` : ""),
 					},
 				],
-				details: { ...stats, autoCompress, version: headroomVersion },
+				details: { ...stats, autoCompress, version: headroomVersion, config },
 			};
 		},
 	});
@@ -632,7 +811,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("headroom", {
 		description:
-			"Headroom compression: toggle, check, setup, or show stats",
+			"Headroom compression: toggle, check, setup, reload config, or show stats",
 		handler: async (args, ctx) => {
 			const sub = (args ?? "").trim().toLowerCase();
 
@@ -640,6 +819,22 @@ export default function (pi: ExtensionAPI) {
 				autoCompress = !autoCompress;
 				ctx.ui.notify(
 					`Headroom auto-compression: ${autoCompress ? "ON" : "OFF"}`,
+					"info",
+				);
+				refreshStatus(ctx);
+				return;
+			}
+
+			if (sub === "reload" || sub === "config") {
+				config = loadExtensionConfig();
+				autoCompress = config.autoCompress;
+				const configuredTools = Object.entries(config.toolProfiles)
+					.filter(([, profile]) => profile.enabled)
+					.map(([name, profile]) => `${name}:${profile.level}`)
+					.sort()
+					.join(", ");
+				ctx.ui.notify(
+					`Headroom config reloaded | auto=${autoCompress ? "on" : "off"} | minTokens=${config.minTokensToCompress} | tools=${configuredTools || "none"}`,
 					"info",
 				);
 				refreshStatus(ctx);
