@@ -1,0 +1,11 @@
+{
+  "name": "pi-headroom",
+  "version": "1.0.0",
+  "description": "Headroom AI context compression for Pi — saves 40-90% of tokens on tool outputs",
+  "keywords": ["pi-package"],
+  "license": "Apache-2.0",
+  "type": "module",
+  "pi": {
+    "extensions": ["./extensions"]
+  }
+}
