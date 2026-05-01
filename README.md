@@ -54,7 +54,8 @@ Place a `.headroom/pi-extension.json` in any of these locations (checked in orde
 {
   "autoCompress": true,
   "autoInstall": true,
-  "minTokensPct": 30
+  "minTokensPct": 30,
+  "maxTokensPct": 50
 }
 ```
 
@@ -75,13 +76,31 @@ Percentage of the **current model's context window** that must be used before co
 
 This avoids cache invalidation in short sessions where prompt caching saves more than compression. In long sessions approaching the limit, compression kicks in to delay Pi's own (lossy, irreversible) compaction.
 
+### Ceiling
+
+**`maxTokensPct`** (default: `50`)
+
+Target ceiling for post-compression context usage. When compression fires, it tells Headroom the *effective* context window is smaller than reality — e.g. 50% of a 200K window → 100K "budget". Headroom's internal pressure logic compresses harder as it approaches this artificial limit, keeping actual usage comfortably under the ceiling.
+
+This means:
+- **minTokensPct** = when compression STARTS ("we need to do something")
+- **maxTokensPct** = how aggressively to compress ("don't let us get this high")
+
+| Model | Real window | Ceiling (50%) | Typical result |
+|-------|------------|---------------|----------------|
+| Claude 4 Opus | 200K | 100K | ~70-80K actual |
+| Claude 3.5 Sonnet | 128K | 64K | ~45-55K actual |
+
+Set lower (e.g. 40%) if you want headroom to spare more, or raise (e.g. 60%) if you're comfortable running tighter.
+
 ### Environment variables
 
 | Variable | Description |
 |----------|-------------|
 | `HEADROOM_OPTIMIZE` / `HEADROOM_PI_AUTO_COMPRESS` | Master on/off switch |
 | `HEADROOM_PI_AUTO_INSTALL` | Allow or block automatic venv setup |
-| `HEADROOM_PI_MIN_PCT` / `HEADROOM_MIN_PCT` | Percentage threshold (e.g. `HEADROOM_PI_MIN_PCT=50` for 50%) |
+| `HEADROOM_PI_MIN_PCT` / `HEADROOM_MIN_PCT` | Min percentage to START compressing (default 30) |
+| `HEADROOM_PI_MAX_PCT` / `HEADROOM_MAX_PCT` | Max ceiling percentage to TARGET (default 50) |
 | `HEADROOM_WORKSPACE_DIR` | Override config file search path |
 | `HEADROOM_MODE=audit` | Disables auto-compression (observe only) |
 
