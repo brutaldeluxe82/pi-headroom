@@ -23,6 +23,7 @@
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { getAgentDir } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -408,16 +409,14 @@ function configFilePath(): string {
 	const cwdPath = resolve(process.cwd(), ".headroom", "pi-extension.json");
 	if (existsSync(cwdPath)) return cwdPath;
 
-	// 3. Pi agent config directory fallback (e.g. ~/.config/pi/.headroom/)
-	const piAgentDir = process.env.PI_CODING_AGENT_DIR;
-	if (piAgentDir) {
-		const expanded = piAgentDir.startsWith("~/")
-			? resolve(homedir(), piAgentDir.slice(2))
-			: piAgentDir.startsWith("~")
-				? resolve(homedir(), piAgentDir.slice(1))
-				: piAgentDir;
-		const piPath = resolve(expanded, ".headroom", "pi-extension.json");
+	// 3. Pi agent config directory (uses Pi's own getAgentDir() which
+	//    resolves PI_CODING_AGENT_DIR, tilde expansion, and defaults)
+	try {
+		const piAgentDir = getAgentDir();
+		const piPath = resolve(piAgentDir, ".headroom", "pi-extension.json");
 		if (existsSync(piPath)) return piPath;
+	} catch {
+		// getAgentDir may not be available in all contexts
 	}
 
 	// 4. Default: CWD (even if it doesn't exist yet — will use defaults)
