@@ -161,14 +161,22 @@ def handle_compress_text(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def handle_compress_messages(payload: dict[str, Any]) -> dict[str, Any]:
-    """Compress a list of messages in OpenAI or Anthropic format."""
-    from headroom import compress
+    """Compress a list of messages in Anthropic format using ContentRouter.
+
+    Uses ContentRouter.apply() directly so we can override exclude_tools
+    with a Pi-specific list. The upstream DEFAULT_EXCLUDE_TOOLS includes
+    bash/grep/glob (designed for Claude Code), but for Pi those are
+    great compression targets — only read/write/edit must be excluded
+    to preserve exact text for the edit tool.
+    """
+    from headroom.transforms.content_router import ContentRouter, ContentRouterConfig
+    from headroom.tokenizer import Tokenizer, TokenCounter
 
     messages = payload.get("messages", [])
     model = payload.get("model", "gpt-4o")
-    target_ratio = payload.get("target_ratio")
     protect_recent = payload.get("protect_recent", 4)
     compress_user_messages = payload.get("compress_user_messages", False)
+    ccr_enabled = bool(payload.get("ccr_enabled", True))
 
     if not messages:
         return {
@@ -180,21 +188,65 @@ def handle_compress_messages(payload: dict[str, Any]) -> dict[str, Any]:
             "transforms_applied": [],
         }
 
-    kwargs: dict[str, Any] = {
-        "protect_recent": protect_recent,
-        "compress_user_messages": compress_user_messages,
+    # Pi-specific exclude list:
+    #   - read/write/edit: MUST be excluded (exact text needed for edits)
+    #   - bash/grep/glob/find/ls: NOT excluded (great compression targets)
+    #   This differs from upstream DEFAULT_EXCLUDE_TOOLS which includes all of them,
+    #   but that default is designed for Claude Code where Bash runs commands
+    #   that produce code-adjacent output. Pi's bash is more like a shell.
+    pi_exclude_tools: set[str] = {
+        "read", "Read",
+        "write", "Write",
+        "edit", "Edit",
     }
-    if target_ratio is not None:
-        kwargs["target_ratio"] = target_ratio
+
+    # Allow callers to override the exclude list
+    custom_excludes = payload.get("exclude_tools")
+    if custom_excludes is not None:
+        pi_exclude_tools = set(custom_excludes) if isinstance(custom_excludes, (list, set)) else pi_exclude_tools
 
     try:
-        result = compress(messages, model=model, **kwargs)
+        config = ContentRouterConfig(
+            exclude_tools=pi_exclude_tools,
+            ccr_enabled=ccr_enabled,
+            ccr_inject_marker=ccr_enabled,
+            protect_recent_code=protect_recent,
+            protect_analysis_context=True,
+        )
+        router = ContentRouter(config)
+
+        # Create a simple tokenizer for token counting
+        class _SimpleCounter:
+            def count_text(self, text: str) -> int:
+                return len(text) // 4
+            def count_message(self, msg: dict[str, Any]) -> int:
+                return self.count_text(str(msg.get("content", "")))
+            def count_messages(self, msgs: list[dict[str, Any]]) -> int:
+                return sum(self.count_message(m) for m in msgs)
+
+        tokenizer = Tokenizer(_SimpleCounter(), model=model)
+
+        # Derive model_limit from the model's known context window
+        model_limit = payload.get("model_limit", 200_000)
+
+        result = router.apply(
+            messages,
+            tokenizer,
+            model=model,
+            model_limit=model_limit,
+            compress_user_messages=compress_user_messages,
+        )
+
+        tokens_before = result.tokens_before
+        tokens_after = result.tokens_after
+        tokens_saved = tokens_before - tokens_after
+
         return {
             "messages": result.messages,
-            "tokens_before": result.tokens_before,
-            "tokens_after": result.tokens_after,
-            "tokens_saved": result.tokens_saved,
-            "compression_ratio": result.compression_ratio,
+            "tokens_before": tokens_before,
+            "tokens_after": tokens_after,
+            "tokens_saved": tokens_saved,
+            "compression_ratio": tokens_saved / tokens_before if tokens_before > 0 else 0.0,
             "transforms_applied": result.transforms_applied,
         }
     except Exception as exc:
