@@ -566,7 +566,7 @@ function loadExtensionConfig(): ExtensionConfig {
 			? false
 			: parseBool(envAutoCompress, fileConfig?.autoCompress ?? true),
 		autoInstall: parseBool(envAutoInstall, fileConfig?.autoInstall ?? true),
-		minTokensToCompress: parseIntEnv(envMinTokens, fileConfig?.minTokensToCompress ?? 200),
+		minTokensToCompress: parseIntEnv(envMinTokens, fileConfig?.minTokensToCompress ?? 4_000),
 		configPath: path,
 		sourceSummary: sources,
 	};

@@ -54,7 +54,7 @@ Place a `.headroom/pi-extension.json` in any of these locations (checked in orde
 {
   "autoCompress": true,
   "autoInstall": true,
-  "minTokensToCompress": 200
+  "minTokensToCompress": 4000
 }
 ```
 
@@ -62,7 +62,7 @@ Place a `.headroom/pi-extension.json` in any of these locations (checked in orde
 |--------|---------|-------------|
 | `autoCompress` | `true` | Enable message-level compression |
 | `autoInstall` | `true` | Auto-install headroom-ai on first session |
-| `minTokensToCompress` | `200` | Minimum estimated tokens before compressing |
+| `minTokensToCompress` | `4000` | Minimum estimated tokens before compression fires. Raise this in short sessions to avoid pointless cache misses; lower it if you hit context limits early. |
 
 ### Environment variables
 
