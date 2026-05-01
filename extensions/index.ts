@@ -598,6 +598,7 @@ export default function (pi: ExtensionAPI) {
 	let installedThisSession = false;
 	let config: ExtensionConfig;
 	let autoCompress = true;
+	let lastTokenEstimate = 0;
 
 	const stats: SessionStats = {
 		requests: 0,
@@ -625,21 +626,20 @@ export default function (pi: ExtensionAPI) {
 	function refreshStatus(
 		ctx: { ui: any },
 		modelWindow?: number,
+		currentTokens?: number,
 	): void {
 		if (!headroomAvailable) {
 			ctx.ui.setStatus("headroom", undefined);
 			return;
 		}
 		const theme = ctx.ui.theme;
-		const currentTokens = stats.tokensBefore;
+		const tokens = currentTokens ?? lastTokenEstimate ?? stats.tokensBefore;
 
 		// Build threshold part: "42%/30%" or "3%/30%"
+		const pct = modelWindow && modelWindow > 0 ? (tokens / modelWindow) * 100 : 0;
 		const thresholdPart =
 			modelWindow && modelWindow > 0
-				? theme.fg(
-						"dim",
-						` ${((currentTokens / modelWindow) * 100).toFixed(0)}%/${config.minTokensPct}%`,
-					)
+				? theme.fg("dim", ` ${pct.toFixed(0)}%/${config.minTokensPct}%`)
 				: "";
 
 		if (stats.tokensSaved > 0) {
@@ -768,10 +768,15 @@ export default function (pi: ExtensionAPI) {
 		const totalText = headroomMessages
 			.map((m) => (typeof m.content === "string" ? m.content : ""))
 			.join("");
+		const currentTokens = estimateTokens(totalText);
+		lastTokenEstimate = currentTokens;
 		const minTokens = Math.floor(
 			(ctx.model?.contextWindow ?? 200_000) * (config.minTokensPct / 100),
 		);
-		if (estimateTokens(totalText) < minTokens) return;
+		if (currentTokens < minTokens) {
+			refreshStatus(ctx, ctx.model?.contextWindow, currentTokens);
+			return;
+		}
 
 		const model = ctx.model?.id ?? "gpt-4o";
 		const modelLimit = ctx.model?.contextWindow ?? 200_000;
@@ -806,7 +811,7 @@ export default function (pi: ExtensionAPI) {
 			if (tokensSaved <= 0) return;
 
 			recordCompression(result.tokens_before, result.tokens_after, result.transforms_applied ?? []);
-			refreshStatus(ctx, ctx.model?.contextWindow);
+			refreshStatus(ctx, ctx.model?.contextWindow, result.tokens_after);
 
 			// Apply compressed messages back to Pi format
 			const compressedMessages = result.messages as Record<string, unknown>[];
