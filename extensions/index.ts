@@ -401,8 +401,28 @@ function estimateTokens(text: string): number {
 }
 
 function configFilePath(): string {
-	const workspace = process.env.HEADROOM_WORKSPACE_DIR || process.cwd();
-	return resolve(workspace, ".headroom", "pi-extension.json");
+	// 1. Explicit workspace override (highest priority)
+	const workspace = process.env.HEADROOM_WORKSPACE_DIR;
+	if (workspace) return resolve(workspace, ".headroom", "pi-extension.json");
+
+	// 2. Project-level config (CWD)
+	const cwdPath = resolve(process.cwd(), ".headroom", "pi-extension.json");
+	if (existsSync(cwdPath)) return cwdPath;
+
+	// 3. Pi agent config directory fallback (e.g. ~/.config/pi/.headroom/)
+	const piAgentDir = process.env.PI_CODING_AGENT_DIR;
+	if (piAgentDir) {
+		const expanded = piAgentDir.startsWith("~/")
+			? resolve(homedir(), piAgentDir.slice(2))
+			: piAgentDir.startsWith("~")
+				? resolve(homedir(), piAgentDir.slice(1))
+				: piAgentDir;
+		const piPath = resolve(expanded, ".headroom", "pi-extension.json");
+		if (existsSync(piPath)) return piPath;
+	}
+
+	// 4. Default: CWD (even if it doesn't exist yet — will use defaults)
+	return cwdPath;
 }
 
 function loadConfigFile(path: string): RawConfigFile | null {
