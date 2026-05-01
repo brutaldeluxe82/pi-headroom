@@ -364,7 +364,6 @@ const DEFAULT_TOOL_LEVELS: Record<string, CompressionLevel> = {
 	grep: "moderate",
 	find: "moderate",
 	ls: "moderate",
-	mcp_exa_exa_search: "moderate",
 	"mcp_context7_resolve-library-id": "moderate",
 	"mcp_context7_query-docs": "moderate",
 	synthetic_web_search: "moderate",
