@@ -170,6 +170,7 @@ def handle_compress_messages(payload: dict[str, Any]) -> dict[str, Any]:
     to preserve exact text for the edit tool.
     """
     from headroom.transforms.content_router import ContentRouter, ContentRouterConfig
+    from headroom.config import ReadLifecycleConfig
     from headroom.tokenizer import Tokenizer, TokenCounter
 
     messages = payload.get("messages", [])
@@ -212,6 +213,12 @@ def handle_compress_messages(payload: dict[str, Any]) -> dict[str, Any]:
             ccr_inject_marker=ccr_enabled,
             protect_recent_code=protect_recent,
             protect_analysis_context=True,
+            read_lifecycle=ReadLifecycleConfig(
+                enabled=True,
+                compress_stale=True,     # Safe: file was edited since read
+                compress_superseded=True, # Safe: file was re-read
+                min_size_bytes=512,       # Only compress reads > 512 bytes
+            ),
         )
         router = ContentRouter(config)
 
