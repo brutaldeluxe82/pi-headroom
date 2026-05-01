@@ -25,6 +25,19 @@ from typing import Any
 # transformers uses its own logger.warning_advice() for the PyTorch message,
 # which ignores Python's warnings module — controlled via env var instead.
 os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
+
+# If Kompress model cache exists, use offline mode to avoid unnecessary
+# API calls to HF Hub (which trigger "unauthenticated requests" warnings
+# when HF_TOKEN is not set). Without offline mode, HF Hub hits the API
+# on every session to revalidate cached models — pointless churn.
+# If no cache exists, we allow the download (first-time setup).
+_HF_CACHE = os.environ.get(
+    "HF_HOME", os.path.join(os.path.expanduser("~"), ".cache", "huggingface")
+)
+_KOMPRESS_CACHE = os.path.join(_HF_CACHE, "hub", "models--chopratejas--kompress-base")
+if os.path.isdir(_KOMPRESS_CACHE):
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+
 warnings.filterwarnings("ignore", message="unauthenticated requests")
 
 try:
