@@ -26,20 +26,6 @@ from typing import Any
 # which ignores Python's warnings module — controlled via env var instead.
 os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
 
-# If Kompress model cache exists, use offline mode to avoid unnecessary
-# API calls to HF Hub (which trigger "unauthenticated requests" warnings
-# when HF_TOKEN is not set). Without offline mode, HF Hub hits the API
-# on every session to revalidate cached models — pointless churn.
-# If no cache exists, we allow the download (first-time setup).
-_HF_CACHE = os.environ.get(
-    "HF_HOME", os.path.join(os.path.expanduser("~"), ".cache", "huggingface")
-)
-_KOMPRESS_CACHE = os.path.join(_HF_CACHE, "hub", "models--chopratejas--kompress-base")
-if os.path.isdir(_KOMPRESS_CACHE):
-    os.environ.setdefault("HF_HUB_OFFLINE", "1")
-
-warnings.filterwarnings("ignore", message="unauthenticated requests")
-
 try:
     import transformers
 
@@ -112,6 +98,65 @@ def handle_check() -> dict[str, Any]:
         "rust_extension": rust_ext,
         "error": error,
     }
+
+
+def handle_check_environment() -> dict[str, Any]:
+    """Check the runtime environment and return actionable warnings.
+
+    Called by the extension on session_start to surface configuration
+    issues to the user rather than silently masking them.
+    """
+    warnings: list[dict[str, str]] = []
+
+    # Check 1: HF_TOKEN not set
+    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    if not hf_token:
+        hf_cache = os.environ.get(
+            "HF_HOME", os.path.join(os.path.expanduser("~"), ".cache", "huggingface")
+        )
+        kompress_cached = os.path.isdir(
+            os.path.join(hf_cache, "hub", "models--chopratejas--kompress-base")
+        )
+        if kompress_cached:
+            warnings.append({
+                "id": "hf_token_missing_cached",
+                "level": "info",
+                "message": (
+                    "HF_TOKEN not set. Kompress model is cached, but Hugging Face Hub "
+                    "is contacted each session to check for updates (without auth, "
+                    "you get lower rate limits). Set HF_TOKEN or export "
+                    "HF_HUB_OFFLINE=1 to skip API calls entirely."
+                ),
+            })
+        else:
+            warnings.append({
+                "id": "hf_token_missing_uncached",
+                "level": "warning",
+                "message": (
+                    "HF_TOKEN not set. Kompress model must be downloaded on first use "
+                    "— without auth, downloads may be rate-limited. Set HF_TOKEN "
+                    "for reliable access."
+                ),
+            })
+
+    # Check 2: PyTorch not available (kompress uses ONNX Runtime instead)
+    try:
+        import torch  # noqa: F401
+    except ImportError:
+        try:
+            import onnxruntime  # noqa: F401
+        except ImportError:
+            warnings.append({
+                "id": "no_ml_backend",
+                "level": "warning",
+                "message": (
+                    "Neither PyTorch nor ONNX Runtime found. Kompress ML compression "
+                    "is unavailable. Install headroom-ai[proxy] for ONNX Runtime, "
+                    "or set HF_HUB_OFFLINE=1 to suppress API calls."
+                ),
+            })
+
+    return {"warnings": warnings}
 
 
 def _strip_ccr_marker(text: str) -> str:
@@ -353,6 +398,7 @@ def handle_payload(payload: dict[str, Any]) -> dict[str, Any]:
     action = payload.get("action", "check")
     handlers = {
         "check": handle_check,
+        "check_environment": lambda: handle_check_environment(),
         "compress_text": lambda: handle_compress_text(payload),
         "compress_messages": lambda: handle_compress_messages(payload),
         "retrieve": lambda: handle_retrieve(payload),

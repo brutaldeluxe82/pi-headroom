@@ -645,6 +645,16 @@ export default function (pi: ExtensionAPI) {
 				} else {
 					ctx.ui.notify(`Headroom v${headroomVersion} loaded`, "info");
 				}
+
+				// Surface environment warnings (missing HF_TOKEN, etc.)
+				try {
+					const envResult = (await callBridge({ action: "check_environment" }, 5_000)) as any;
+					for (const w of envResult.warnings ?? []) {
+						ctx.ui.notify(w.message, w.level === "warning" ? "warning" : "info");
+					}
+				} catch {
+					// Non-critical — don't block startup
+				}
 			} else if (!installedThisSession && config.autoInstall) {
 				installedThisSession = true;
 				const ok = await installHeadroom(ctx.ui, ctx.signal);
