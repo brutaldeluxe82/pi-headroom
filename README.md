@@ -54,15 +54,26 @@ Place a `.headroom/pi-extension.json` in any of these locations (checked in orde
 {
   "autoCompress": true,
   "autoInstall": true,
-  "minTokensToCompress": 4000
+  "minTokensPct": 30
 }
 ```
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `autoCompress` | `true` | Enable message-level compression |
-| `autoInstall` | `true` | Auto-install headroom-ai on first session |
-| `minTokensToCompress` | `4000` | Minimum estimated tokens before compression fires. Raise this in short sessions to avoid pointless cache misses; lower it if you hit context limits early. |
+You can also configure per-project thresholds — vary the percentage based on the model's cap or the session's expected length.
+
+### Threshold
+
+**`minTokensPct`** (default: `30`)
+
+Percentage of the **current model's context window** that must be used before compression fires. This adapts automatically to whatever model Pi is running:
+
+| Model | Context Window | 30% Threshold |
+|-------|-------------|---------------|
+| Claude 3.5 Sonnet | 128K | ~38K tokens |
+| Claude 4 (Opus) | 200K | ~60K tokens |
+| GPT-4 | 128K | ~38K tokens |
+| o4 mini | 200K | ~60K tokens |
+
+This avoids cache invalidation in short sessions where prompt caching saves more than compression. In long sessions approaching the limit, compression kicks in to delay Pi's own (lossy, irreversible) compaction.
 
 ### Environment variables
 
@@ -70,9 +81,11 @@ Place a `.headroom/pi-extension.json` in any of these locations (checked in orde
 |----------|-------------|
 | `HEADROOM_OPTIMIZE` / `HEADROOM_PI_AUTO_COMPRESS` | Master on/off switch |
 | `HEADROOM_PI_AUTO_INSTALL` | Allow or block automatic venv setup |
-| `HEADROOM_PI_MIN_TOKENS` / `HEADROOM_MIN_TOKENS` | Minimum tokens before compression |
+| `HEADROOM_PI_MIN_PCT` / `HEADROOM_MIN_PCT` | Percentage threshold (e.g. `HEADROOM_PI_MIN_PCT=50` for 50%) |
 | `HEADROOM_WORKSPACE_DIR` | Override config file search path |
 | `HEADROOM_MODE=audit` | Disables auto-compression (observe only) |
+
+> **Legacy:** `minTokensToCompress` is still accepted in config files. If present, it is converted to an equivalent percentage (e.g. `4000` → `2%` of a 200K window).
 
 ## Architecture
 

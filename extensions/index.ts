@@ -474,6 +474,12 @@ function parseBool(value: string | undefined, fallback: boolean): boolean {
 	return fallback;
 }
 
+function parseFloatEnv(value: string | undefined, fallback: number): number {
+	if (value == null || value === "") return fallback;
+	const parsed = Number.parseFloat(value);
+	return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
 function parseIntEnv(value: string | undefined, fallback: number): number {
 	if (value == null || value === "") return fallback;
 	const parsed = Number.parseInt(value, 10);
@@ -497,7 +503,7 @@ function fmtTokens(n: number): string {
 interface ExtensionConfig {
 	autoCompress: boolean;
 	autoInstall: boolean;
-	minTokensToCompress: number;
+	minTokensPct: number;
 	configPath: string;
 	sourceSummary: string[];
 }
@@ -505,7 +511,7 @@ interface ExtensionConfig {
 interface RawConfigFile {
 	autoCompress?: boolean;
 	autoInstall?: boolean;
-	minTokensToCompress?: number;
+	minTokensPct?: number;
 }
 
 function configFilePath(): string {
@@ -547,6 +553,7 @@ function loadExtensionConfig(): ExtensionConfig {
 	const envAutoCompress = process.env.HEADROOM_PI_AUTO_COMPRESS ?? process.env.HEADROOM_OPTIMIZE;
 	const envAutoInstall = process.env.HEADROOM_PI_AUTO_INSTALL;
 	const envMinTokens = process.env.HEADROOM_PI_MIN_TOKENS ?? process.env.HEADROOM_MIN_TOKENS;
+	const envMinTokensPct = process.env.HEADROOM_PI_MIN_PCT ?? process.env.HEADROOM_MIN_PCT;
 
 	const mode = (process.env.HEADROOM_MODE || "").trim().toLowerCase();
 	const modeForcesDisable = mode === "audit";
@@ -559,14 +566,22 @@ function loadExtensionConfig(): ExtensionConfig {
 	if (envAutoInstall) sources.push("env:HEADROOM_PI_AUTO_INSTALL");
 	if (envMinTokens)
 		sources.push(process.env.HEADROOM_PI_MIN_TOKENS ? "env:HEADROOM_PI_MIN_TOKENS" : "env:HEADROOM_MIN_TOKENS");
-	if (modeForcesDisable) sources.push("env:HEADROOM_MODE=audit");
+	if (envMinTokensPct)
+		sources.push(process.env.HEADROOM_PI_MIN_PCT ? "env:HEADROOM_PI_MIN_PCT" : "env:HEADROOM_MIN_PCT");
 
 	return {
 		autoCompress: modeForcesDisable
 			? false
 			: parseBool(envAutoCompress, fileConfig?.autoCompress ?? true),
 		autoInstall: parseBool(envAutoInstall, fileConfig?.autoInstall ?? true),
-		minTokensToCompress: parseIntEnv(envMinTokens, fileConfig?.minTokensToCompress ?? 4_000),
+		minTokensPct: parseFloatEnv(
+			envMinTokensPct,
+			fileConfig?.minTokensPct ??
+				(fileConfig?.minTokensToCompress != null
+					? // Legacy: convert absolute token setting to percentage
+						Math.min((fileConfig.minTokensToCompress / 200_000) * 100, 90)
+					: 30),
+		),
 		configPath: path,
 		sourceSummary: sources,
 	};
@@ -728,11 +743,14 @@ export default function (pi: ExtensionAPI) {
 		const headroomMessages = piMessagesToHeadroom(messages as Record<string, unknown>[]);
 		if (headroomMessages.length === 0) return;
 
-		// Estimate total tokens — skip compression if below threshold
-		const totalText = headroomMessages
-			.map((m) => (typeof m.content === "string" ? m.content : ""))
-			.join("");
-		if (estimateTokens(totalText) < config.minTokensToCompress) return;
+		// Only compress when estimated tokens exceed a percentage of the model's
+		// context window. Default 30% means ~38K tokens for Claude 3.5 Sonnet
+		// (128K) and ~60K for Claude 4 (200K). This avoids cache invalidation
+		// in short sessions where prompt caching saves more than compression.
+		const minTokens = Math.floor(
+			(ctx.model?.contextWindow ?? 200_000) * (config.minTokensPct / 100),
+		);
+		if (estimateTokens(totalText) < minTokens) return;
 
 		const model = ctx.model?.id ?? "gpt-4o";
 		const modelLimit = ctx.model?.contextWindow ?? 200_000;
@@ -908,7 +926,8 @@ export default function (pi: ExtensionAPI) {
 							`  Errors: ${stats.errors}\n` +
 							`  Auto-compress: ${autoCompress ? "on" : "off"}\n` +
 							`  Auto-install: ${config.autoInstall ? "on" : "off"}\n` +
-							`  Min tokens to compress: ${config.minTokensToCompress}\n` +
+							`  Compression threshold: ${config.minTokensPct}% of ${ctx.model?.contextWindow ?? 200_000} token window (~${Math.floor(((ctx.model?.contextWindow ?? 200_000) * config.minTokensPct) / 100)} tokens)
+` +
 							`  Rust extension: ${hasRustExtension ? "yes" : "no"}\n` +
 							`  Version: ${headroomVersion ?? "unknown"}\n` +
 							`  Platform wheel: ${findBundledWheel() ? "bundled" : "none"}\n` +
@@ -945,7 +964,7 @@ export default function (pi: ExtensionAPI) {
 				config = loadExtensionConfig();
 				autoCompress = config.autoCompress;
 				ctx.ui.notify(
-					`Headroom config reloaded | auto=${autoCompress ? "on" : "off"} | minTokens=${config.minTokensToCompress}`,
+					`Headroom config reloaded | auto=${autoCompress ? "on" : "off"} | threshold=${config.minTokensPct}%`,
 					"info",
 				);
 				refreshStatus(ctx);
