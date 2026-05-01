@@ -905,7 +905,12 @@ export default function (pi: ExtensionAPI) {
 		description: "View cumulative compression statistics for the current session.",
 		promptSnippet: "Show Headroom compression stats for this session",
 		parameters: Type.Object({}),
-		async execute() {
+		async execute(_toolCallId, _params, ctx) {
+			const modelWindow = ctx.model?.contextWindow ?? 200_000;
+			const thresholdTokens = Math.floor(modelWindow * (config.minTokensPct / 100));
+			const currentTokens = stats.tokensBefore;
+			const status = currentTokens >= thresholdTokens ? "ACTIVE (compressing)" : "IDLE (under threshold)";
+
 			const pct =
 				stats.tokensBefore > 0
 					? ((stats.tokensSaved / stats.tokensBefore) * 100).toFixed(1)
@@ -929,8 +934,9 @@ export default function (pi: ExtensionAPI) {
 							`  Errors: ${stats.errors}\n` +
 							`  Auto-compress: ${autoCompress ? "on" : "off"}\n` +
 							`  Auto-install: ${config.autoInstall ? "on" : "off"}\n` +
-							`  Compression threshold: ${config.minTokensPct}% of ${ctx.model?.contextWindow ?? 200_000} token window (~${Math.floor(((ctx.model?.contextWindow ?? 200_000) * config.minTokensPct) / 100)} tokens)
-` +
+							`  Compression threshold: ${config.minTokensPct}% of ${modelWindow} token window (~${fmtTokens(thresholdTokens)})\n` +
+							`  Current usage: ${fmtTokens(currentTokens)} tokens (${((currentTokens / modelWindow) * 100).toFixed(1)}% of window)\n` +
+							`  Compressor status: ${status}\n` +
 							`  Rust extension: ${hasRustExtension ? "yes" : "no"}\n` +
 							`  Version: ${headroomVersion ?? "unknown"}\n` +
 							`  Platform wheel: ${findBundledWheel() ? "bundled" : "none"}\n` +
