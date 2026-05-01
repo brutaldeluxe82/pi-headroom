@@ -605,6 +605,7 @@ export default function (pi: ExtensionAPI) {
 	let config: ExtensionConfig;
 	let autoCompress = true;
 	let lastTokenEstimate = 0;
+	let lastModelWindow: number | undefined;
 
 	const stats: SessionStats = {
 		requests: 0,
@@ -786,6 +787,7 @@ export default function (pi: ExtensionAPI) {
 
 		const model = ctx.model?.id ?? "gpt-4o";
 		const modelWindow = ctx.model?.contextWindow ?? 200_000;
+		lastModelWindow = modelWindow;
 		// ceiling: tell headroom the budget is smaller than the real window
 		// so it compresses aggressively enough to stay under the target percentage.
 		// e.g. 50% max on 200K window → model_limit=100K → headroom
@@ -942,8 +944,10 @@ export default function (pi: ExtensionAPI) {
 		async execute(_toolCallId, _params, ctx) {
 			const modelWindow = ctx.model?.contextWindow ?? 200_000;
 			const thresholdTokens = Math.floor(modelWindow * (config.minTokensPct / 100));
-			const currentTokens = stats.tokensBefore;
-			const status = currentTokens >= thresholdTokens ? "ACTIVE (compressing)" : "IDLE (under threshold)";
+			const ceilingTokens = Math.floor(modelWindow * (config.maxTokensPct / 100));
+			const currentTokens = lastTokenEstimate;
+			const status =
+				currentTokens >= thresholdTokens ? "ACTIVE (compressing)" : "IDLE (under threshold)";
 
 			const pct =
 				stats.tokensBefore > 0
