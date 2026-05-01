@@ -697,6 +697,14 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// -----------------------------------------------------------------------
+	// Session shutdown — clean up bridge process
+	// -----------------------------------------------------------------------
+
+	pi.on("session_shutdown", () => {
+		stopBridgeProcess();
+	});
+
+	// -----------------------------------------------------------------------
 	// Context event — message-level compression before each LLM call
 	// -----------------------------------------------------------------------
 
@@ -717,6 +725,7 @@ export default function (pi: ExtensionAPI) {
 		if (estimateTokens(totalText) < config.minTokensToCompress) return;
 
 		const model = ctx.model?.id ?? "gpt-4o";
+		const modelLimit = ctx.model?.contextWindow ?? 200_000;
 
 		try {
 			const result = (await callBridge(
@@ -724,9 +733,11 @@ export default function (pi: ExtensionAPI) {
 					action: "compress_messages",
 					messages: headroomMessages,
 					model,
-					// Headroom's compress() defaults are designed for coding agents:
-					// - DEFAULT_EXCLUDE_TOOLS: Read/Write/Edit/Grep are never compressed
-					// - ReadLifecycle: stale/superseded Reads are safely compressed
+					model_limit: modelLimit,
+					// Pi-specific exclude list (bridge overrides DEFAULT_EXCLUDE_TOOLS):
+					// - Excluded: read, write, edit (exact text needed for edits)
+					// - NOT excluded: bash, grep, find, ls (compression targets)
+					// - ReadLifecycle: stale/supeded reads safely compressed
 					// - protect_recent_code=4: recent code messages protected
 					// - protect_analysis_context=True: analysis code protected
 					protect_recent: 4,
