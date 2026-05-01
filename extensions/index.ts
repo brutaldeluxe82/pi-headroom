@@ -332,15 +332,22 @@ async function callBridge(
 // ---------------------------------------------------------------------------
 
 /**
- * Convert Pi's AgentMessage[] to the format Headroom's compress() expects.
+ * Convert Pi's AgentMessage[] to the Anthropic-format message list that
+ * Headroom's compress() expects.
  *
  * Pi uses: UserMessage, AssistantMessage, ToolResultMessage
- * Headroom expects: Anthropic or OpenAI format (dicts with role/content)
+ *   - AssistantMessage.content = (TextContent | ThinkingContent | ToolCall)[]
+ *   - ToolResultMessage has toolCallId, toolName, content
  *
- * We convert to Anthropic format since Headroom's pipeline is designed for it:
- *   user → { role: "user", content: ... }
- *   assistant → { role: "assistant", content: ... }
- *   toolResult → { role: "tool", tool_call_id: ..., content: ..., name: ... }
+ * Headroom expects Anthropic format:
+ *   - user → { role: "user", content: string }
+ *   - assistant → { role: "assistant", content: [{type:"text",...}, {type:"tool_use",...}] }
+ *   - toolResult → { role: "tool", tool_call_id, content, name }
+ *
+ * CRITICAL: We must preserve tool_use blocks in assistant messages so that
+ * Headroom's _build_tool_name_map can resolve tool_call_id → tool_name.
+ * This is how DEFAULT_EXCLUDE_TOOLS works — without it, Headroom can't
+ * identify which tool results to skip (Read, Write, Edit, etc.).
  */
 function piMessagesToHeadroom(messages: Record<string, unknown>[]): Record<string, unknown>[] {
 	return messages
@@ -352,7 +359,7 @@ function piMessagesToHeadroom(messages: Record<string, unknown>[]): Record<strin
 			const role = msg.role as string;
 
 			if (role === "toolResult") {
-				// Convert Pi ToolResultMessage → Anthropic tool result format
+				// Pi ToolResultMessage → Anthropic tool result
 				const content = msg.content as Array<{ type: string; text?: string }>;
 				const textContent = content
 					?.filter((b) => b.type === "text" && typeof b.text === "string")
@@ -368,16 +375,40 @@ function piMessagesToHeadroom(messages: Record<string, unknown>[]): Record<strin
 			}
 
 			if (role === "assistant") {
-				// Flatten assistant content blocks to text for compression
-				const content = msg.content as Array<{ type: string; text?: string }>;
-				const textContent = content
-					?.filter((b) => b.type === "text" && typeof b.text === "string")
-					.map((b) => b.text!)
-					.join("\n") ?? "";
+				// Pi AssistantMessage → Anthropic assistant with tool_use blocks preserved
+				//
+				// Pi content blocks: {type:"text", text:...} | {type:"thinking",...} | {type:"toolCall", id, name, arguments}
+				// Anthropic content blocks: {type:"text", text:...} | {type:"tool_use", id, name, input:{...}}
+				const content = msg.content as Array<Record<string, unknown>>;
+				if (!Array.isArray(content)) {
+					return { role: "assistant", content: String(content ?? "") };
+				}
+
+				const anthropicBlocks: Record<string, unknown>[] = [];
+				for (const block of content) {
+					if (block.type === "text" && typeof block.text === "string") {
+						anthropicBlocks.push({ type: "text", text: block.text });
+					} else if (block.type === "toolCall") {
+						// Convert Pi's {type:"toolCall", id, name, arguments} →
+						// Anthropic's {type:"tool_use", id, name, input:{...}}
+						anthropicBlocks.push({
+							type: "tool_use",
+							id: block.id ?? "",
+							name: block.name ?? "",
+							input: block.arguments ?? block.input ?? {},
+						});
+					}
+					// Skip thinking blocks — Headroom doesn't need them
+				}
+
+				// Anthropic requires at least one content block
+				if (anthropicBlocks.length === 0) {
+					anthropicBlocks.push({ type: "text", text: "" });
+				}
 
 				return {
 					role: "assistant",
-					content: textContent,
+					content: anthropicBlocks,
 				};
 			}
 
@@ -388,8 +419,8 @@ function piMessagesToHeadroom(messages: Record<string, unknown>[]): Record<strin
 			}
 			if (Array.isArray(content)) {
 				const textContent = content
-					.filter((b) => b.type === "text" && typeof (b as any).text === "string")
-					.map((b) => (b as any).text!)
+					.filter((b: any) => b.type === "text" && typeof b.text === "string")
+					.map((b: any) => b.text!)
 					.join("\n");
 				return { role: "user", content: textContent };
 			}

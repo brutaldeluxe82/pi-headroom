@@ -1,6 +1,18 @@
 # pi-headroom
 
-[Headroom AI](https://github.com/chopratejas/headroom) context compression for Pi — automatically compresses tool outputs to save 40–90% of tokens without losing accuracy.
+[Headroom AI](https://github.com/chopratejas/headroom) context compression for Pi — automatically compresses messages to save 40–90% of tokens without losing accuracy.
+
+## How it works
+
+Uses Pi's `context` event hook to compress the **full message list** before each LLM call — the same architecture as `headroom wrap` and the Headroom proxy. This gives you Headroom's complete safety pipeline:
+
+- **DEFAULT_EXCLUDE_TOOLS** — Read, Write, Edit, Grep are never compressed (exact text needed for edits)
+- **ReadLifecycle** — Stale/superseded reads are safely compressed; fresh reads are untouched
+- **protect_recent_code** — Recent code messages are protected from compression
+- **protect_analysis_context** — Code in analysis/review context is never compressed
+- **CCR (Compress-Cache-Rettrieve)** — Compression is reversible; original content can always be retrieved
+
+Bash/tool outputs (logs, search results, etc.) are compressed automatically. Code from `read` passes through untouched so the `edit` tool always works with exact text.
 
 ## Install
 
@@ -9,104 +21,97 @@ pi install git:github.com/brutaldeluxe82/pi-headroom
 /reload
 ```
 
-Headroom auto-installs on first session start (requires `uv` and Python 3.12 on PATH). No manual setup needed.
+Headroom auto-installs on first session start. Requires `uv` and Python 3.12 on PATH.
 
-## What it does
+## Tools provided
 
-**Auto-compresses** tool results before they reach the LLM context window. Every tool output from `bash`, `read`, `grep`, `mcp_exa_exa_search`, `mcp_context7_*`, and others passes through Headroom's compression pipeline:
+| Tool | Description |
+|------|-------------|
+| `headroom_compress` | Compress any text on demand (for manually reducing large outputs) |
+| `headroom_retrieve` | Retrieve original uncompressed content from CCR compression markers |
+| `headroom_stats` | View cumulative compression statistics for the session |
 
-- **SmartCrusher** (Rust) — JSON/array → compact CSV
-- **ContentRouter** — detect type, route to the right compressor
-- **CacheAligner** — stabilize prefix for better provider cache hits
-- **Kompress-base** — ML text compression for unstructured content
+## Commands
 
-**Reversible via CCR** — compression is not deletion. The LLM can call `headroom_retrieve` to pull original bytes from any compression marker.
-
-## Registered tools
-
-| Tool | Purpose |
-|------|---------|
-| `headroom_compress` | Compress text to reduce token count while preserving meaning |
-| `headroom_retrieve` | Retrieve original uncompressed content from a CCR hash |
-| `headroom_stats` | View cumulative compression statistics for the current session |
-
-## Registered command
-
-`/headroom` — subcommands: `toggle`, `check`, `setup`, `reload`, `clean`, or show stats.
+| Command | Description |
+|---------|-------------|
+| `/headroom` | Show stats |
+| `/headroom toggle` | Toggle auto-compression on/off |
+| `/headroom check` | Check Headroom installation status |
+| `/headroom setup` | Manually install/set up Headroom |
+| `/headroom reload` | Reload config from disk |
+| `/headroom clean` | Remove Headroom venv |
 
 ## Configuration
 
-Config file: `.headroom/pi-extension.json` in the workspace directory.
+Place a `.headroom/pi-extension.json` in any of these locations (checked in order):
+
+1. `HEADROOM_WORKSPACE_DIR/.headroom/pi-extension.json` — explicit override
+2. `{cwd}/.headroom/pi-extension.json` — project-level
+3. Pi agent config dir (e.g. `~/.config/pi/.headroom/pi-extension.json`) — global fallback
 
 ```json
 {
   "autoCompress": true,
   "autoInstall": true,
-  "minTokensToCompress": 500,
-  "minTokensSaved": 50,
-  "toolProfiles": {
-    "bash": "moderate",
-    "read": "conservative",
-    "mcp_exa_exa_search": "aggressive"
-  }
+  "minTokensToCompress": 200
 }
 ```
 
+| Option | Default | Description |
+|--------|---------|-------------|
+| `autoCompress` | `true` | Enable message-level compression |
+| `autoInstall` | `true` | Auto-install headroom-ai on first session |
+| `minTokensToCompress` | `200` | Minimum estimated tokens before compressing |
+
 ### Environment variables
 
-| Variable | Purpose |
-|----------|---------|
+| Variable | Description |
+|----------|-------------|
 | `HEADROOM_OPTIMIZE` / `HEADROOM_PI_AUTO_COMPRESS` | Master on/off switch |
 | `HEADROOM_PI_AUTO_INSTALL` | Allow or block automatic venv setup |
-| `HEADROOM_PI_MIN_TOKENS` / `HEADROOM_MIN_TOKENS` | Global minimum size before auto-compress runs |
-| `HEADROOM_PI_MIN_TOKENS_SAVED` | Minimum savings required before replacing tool output |
-| `HEADROOM_TOOL_PROFILES` | Per-tool profiles, e.g. `bash:moderate,read:conservative` |
-| `HEADROOM_MODE=audit` | Disables auto-compression |
-
-### Tool profile levels
-
-| Level | Behaviour |
-|-------|-----------|
-| `off` | Never auto-compress that tool |
-| `conservative` | Keep more context |
-| `moderate` | Default balance |
-| `aggressive` | Compress more aggressively |
+| `HEADROOM_PI_MIN_TOKENS` / `HEADROOM_MIN_TOKENS` | Minimum tokens before compression |
+| `HEADROOM_WORKSPACE_DIR` | Override config file search path |
+| `HEADROOM_MODE=audit` | Disables auto-compression (observe only) |
 
 ## Architecture
 
 ```
-pi-headroom/
-├── package.json
-├── extensions/
-│   └── index.ts          # Pi extension — tool hooks, auto-compress, status bar
-├── python/
-│   └── headroom_bridge.py  # Long-lived Python process (stdin/stdout JSON bridge)
-└── wheels/
-    └── headroom_core_py-*.whl  # Bundled Rust SmartCrusher wheel (Linux x86_64)
+Pi AgentSession
+  │ context event (before each LLM call)
+  │ AgentMessage[] — Pi's internal format
+  ▼
+pi-headroom extension
+  │ piMessagesToHeadroom() — convert to Anthropic format
+  │ callBridge("compress_messages") — full Headroom pipeline
+  │   ├── DEFAULT_EXCLUDE_TOOLS (Read/Write/Edit → skip)
+  │   ├── ReadLifecycle (stale/superseded → safe compress)
+  │   ├── protect_recent_code (recent code → skip)
+  │   ├── ContentRouter (AST-aware routing)
+  │   ├── SmartCrusher (JSON/array compression)
+  │   ├── Kompress-base (ML text compression)
+  │   └── CCR (cache originals for retrieval)
+  │ applyCompressedMessages() — patch back to Pi format
+  ▼
+Compressed AgentMessage[] → Pi → LLM
 ```
 
-The extension communicates with Python via a JSON bridge over stdin/stdout. It runs as a long-lived helper process so Headroom's in-memory CCR store survives across compression and retrieval calls within the session.
-
-On startup, the extension auto-detects a bundled wheel for the current platform and installs it into a dedicated Python 3.12 venv at `~/.local/share/headroom-venv`.
+The extension communicates with Python via a JSONL bridge (`headroom_bridge.py`) running as a long-lived child process. CCR state survives across calls within the session.
 
 ## Requirements
 
 - **Python 3.12** (required by PyO3 — Python 3.14 is not yet supported)
 - **uv** (for venv creation and pip install)
 
-On Linux x86_64, the pre-built Rust SmartCrusher wheel is bundled — no Rust toolchain needed. Headroom runs without the Rust extension (limited to non-SmartCrusher compression).
+On Linux x86_64, a pre-built Rust SmartCrusher wheel is bundled — no Rust toolchain needed. On other platforms, Headroom runs without the Rust extension (still works, just without the fast SmartCrusher).
 
-## Adding platform wheels
-
-To add a wheel for macOS ARM64:
+## Building Rust wheels for other platforms
 
 ```bash
 # On a macOS ARM64 machine with Python 3.12 + maturin:
 git clone https://github.com/chopratejas/headroom.git
 cd headroom
 maturin build -m crates/headroom-py/Cargo.toml --release --interpreter python3.12
-
-# Copy wheel into the package:
 cp target/wheels/headroom_core_py-*.whl pi-headroom/wheels/
 ```
 
