@@ -641,11 +641,12 @@ export default function (pi: ExtensionAPI) {
 		}
 		const theme = ctx.ui.theme;
 		const tokens = currentTokens ?? lastTokenEstimate ?? stats.tokensBefore;
+		const window = modelWindow ?? lastModelWindow ?? 200_000;
 
 		// Build threshold part: "42%/30%" or "3%/30%"
-		const pct = modelWindow && modelWindow > 0 ? (tokens / modelWindow) * 100 : 0;
+		const pct = window > 0 ? (tokens / window) * 100 : 0;
 		const thresholdPart =
-			modelWindow && modelWindow > 0
+			window > 0
 				? theme.fg("dim", ` ${pct.toFixed(0)}%/${config.minTokensPct}%`)
 				: "";
 
@@ -777,17 +778,17 @@ export default function (pi: ExtensionAPI) {
 			.join("");
 		const currentTokens = estimateTokens(totalText);
 		lastTokenEstimate = currentTokens;
+		const modelWindow = ctx.model?.contextWindow ?? lastModelWindow ?? 200_000;
+		lastModelWindow = modelWindow;
 		const minTokens = Math.floor(
-			(ctx.model?.contextWindow ?? 200_000) * (config.minTokensPct / 100),
+			modelWindow * (config.minTokensPct / 100),
 		);
 		if (currentTokens < minTokens) {
-			refreshStatus(ctx, ctx.model?.contextWindow, currentTokens);
+			refreshStatus(ctx, modelWindow, currentTokens);
 			return;
 		}
 
 		const model = ctx.model?.id ?? "gpt-4o";
-		const modelWindow = ctx.model?.contextWindow ?? 200_000;
-		lastModelWindow = modelWindow;
 		// ceiling: tell headroom the budget is smaller than the real window
 		// so it compresses aggressively enough to stay under the target percentage.
 		// e.g. 50% max on 200K window → model_limit=100K → headroom
@@ -824,7 +825,7 @@ export default function (pi: ExtensionAPI) {
 			if (tokensSaved <= 0) return;
 
 			recordCompression(result.tokens_before, result.tokens_after, result.transforms_applied ?? []);
-			refreshStatus(ctx, ctx.model?.contextWindow, result.tokens_after);
+			refreshStatus(ctx, modelWindow, result.tokens_after);
 
 			// Apply compressed messages back to Pi format
 			const compressedMessages = result.messages as Record<string, unknown>[];
@@ -942,7 +943,7 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: "Show Headroom compression stats for this session",
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params, ctx) {
-			const modelWindow = ctx.model?.contextWindow ?? 200_000;
+			const modelWindow = lastModelWindow ?? ctx.model?.contextWindow ?? 200_000;
 			const thresholdTokens = Math.floor(modelWindow * (config.minTokensPct / 100));
 			const ceilingTokens = Math.floor(modelWindow * (config.maxTokensPct / 100));
 			const currentTokens = lastTokenEstimate;
@@ -972,7 +973,8 @@ export default function (pi: ExtensionAPI) {
 							`  Errors: ${stats.errors}\n` +
 							`  Auto-compress: ${autoCompress ? "on" : "off"}\n` +
 							`  Auto-install: ${config.autoInstall ? "on" : "off"}\n` +
-							`  Compression threshold: ${config.minTokensPct}% of ${modelWindow} token window (~${fmtTokens(thresholdTokens)})\n` +
+							`  Compression threshold: ${config.minTokensPct}% of ${fmtTokens(modelWindow)} window (~${fmtTokens(thresholdTokens)})\n` +
+							`  Ceiling: ${config.maxTokensPct}% of ${fmtTokens(modelWindow)} window (~${fmtTokens(ceilingTokens)})\n` +
 							`  Current usage: ${fmtTokens(currentTokens)} tokens (${((currentTokens / modelWindow) * 100).toFixed(1)}% of window)\n` +
 							`  Compressor status: ${status}\n` +
 							`  Rust extension: ${hasRustExtension ? "yes" : "no"}\n` +
