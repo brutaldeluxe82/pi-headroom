@@ -747,6 +747,9 @@ export default function (pi: ExtensionAPI) {
 		// context window. Default 30% means ~38K tokens for Claude 3.5 Sonnet
 		// (128K) and ~60K for Claude 4 (200K). This avoids cache invalidation
 		// in short sessions where prompt caching saves more than compression.
+		const totalText = headroomMessages
+			.map((m) => (typeof m.content === "string" ? m.content : ""))
+			.join("");
 		const minTokens = Math.floor(
 			(ctx.model?.contextWindow ?? 200_000) * (config.minTokensPct / 100),
 		);
