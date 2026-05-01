@@ -504,6 +504,7 @@ interface ExtensionConfig {
 	autoCompress: boolean;
 	autoInstall: boolean;
 	minTokensPct: number;
+	maxTokensPct: number;
 	configPath: string;
 	sourceSummary: string[];
 }
@@ -512,6 +513,7 @@ interface RawConfigFile {
 	autoCompress?: boolean;
 	autoInstall?: boolean;
 	minTokensPct?: number;
+	maxTokensPct?: number;
 }
 
 function configFilePath(): string {
@@ -554,6 +556,7 @@ function loadExtensionConfig(): ExtensionConfig {
 	const envAutoInstall = process.env.HEADROOM_PI_AUTO_INSTALL;
 	const envMinTokens = process.env.HEADROOM_PI_MIN_TOKENS ?? process.env.HEADROOM_MIN_TOKENS;
 	const envMinTokensPct = process.env.HEADROOM_PI_MIN_PCT ?? process.env.HEADROOM_MIN_PCT;
+	const envMaxTokensPct = process.env.HEADROOM_PI_MAX_PCT ?? process.env.HEADROOM_MAX_PCT;
 
 	const mode = (process.env.HEADROOM_MODE || "").trim().toLowerCase();
 	const modeForcesDisable = mode === "audit";
@@ -568,6 +571,8 @@ function loadExtensionConfig(): ExtensionConfig {
 		sources.push(process.env.HEADROOM_PI_MIN_TOKENS ? "env:HEADROOM_PI_MIN_TOKENS" : "env:HEADROOM_MIN_TOKENS");
 	if (envMinTokensPct)
 		sources.push(process.env.HEADROOM_PI_MIN_PCT ? "env:HEADROOM_PI_MIN_PCT" : "env:HEADROOM_MIN_PCT");
+	if (envMaxTokensPct)
+		sources.push(process.env.HEADROOM_PI_MAX_PCT ? "env:HEADROOM_PI_MAX_PCT" : "env:HEADROOM_MAX_PCT");
 
 	return {
 		autoCompress: modeForcesDisable
@@ -582,6 +587,7 @@ function loadExtensionConfig(): ExtensionConfig {
 						Math.min((fileConfig.minTokensToCompress / 200_000) * 100, 90)
 					: 30),
 		),
+		maxTokensPct: parseFloatEnv(envMaxTokensPct, fileConfig?.maxTokensPct ?? 50),
 		configPath: path,
 		sourceSummary: sources,
 	};
@@ -779,7 +785,12 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		const model = ctx.model?.id ?? "gpt-4o";
-		const modelLimit = ctx.model?.contextWindow ?? 200_000;
+		const modelWindow = ctx.model?.contextWindow ?? 200_000;
+		// ceiling: tell headroom the budget is smaller than the real window
+		// so it compresses aggressively enough to stay under the target percentage.
+		// e.g. 50% max on 200K window → model_limit=100K → headroom
+		// treats 100K as "full" and compresses harder.
+		const modelLimit = Math.floor(modelWindow * (config.maxTokensPct / 100));
 
 		try {
 			const result = (await callBridge(
