@@ -15,13 +15,16 @@ Actions:
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import warnings
 from typing import Any
 
-# Suppress noisy warnings from optional ML dependencies (transformers, HF Hub)
-warnings.filterwarnings("ignore", message="PyTorch was not found")
+# Suppress noisy warnings from optional ML dependencies (transformers, HF Hub).
+# transformers uses its own logger.warning_advice() for the PyTorch message,
+# which ignores Python's warnings module — controlled via env var instead.
+os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
 warnings.filterwarnings("ignore", message="unauthenticated requests")
 
 try:
