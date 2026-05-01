@@ -272,8 +272,17 @@ def handle_compress_messages(payload: dict[str, Any]) -> dict[str, Any]:
             exclude_tools=pi_exclude_tools,
             ccr_enabled=ccr_enabled,
             ccr_inject_marker=ccr_enabled,
-            protect_recent_code=protect_recent,
-            protect_analysis_context=True,
+            protect_recent_code=0,  # DISABLED for Pi: our exclude_tools already
+                                    # protects read/write/edit content. The upstream
+                                    # default (4) protects bash log output detected
+                                    # as "source_code", preventing compression of the
+                                    # very content we most want to compress.
+            protect_analysis_context=False,  # DISABLED for Pi: detects "analysis intent"
+                                            # (e.g. "fix the code") and shields all
+                                            # source-code-detected content including bash
+                                            # logs from compression. Our exclude_tools
+                                            # already protects read/write/edit, and
+                                            # compress_stale=False keeps reads alive.
             read_lifecycle=ReadLifecycleConfig(
                 enabled=True,
                 compress_stale=False,    # DISABLED: Pi agents do read → edit → edit patterns
