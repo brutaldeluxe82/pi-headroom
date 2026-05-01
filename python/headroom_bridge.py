@@ -215,9 +215,14 @@ def handle_compress_messages(payload: dict[str, Any]) -> dict[str, Any]:
             protect_analysis_context=True,
             read_lifecycle=ReadLifecycleConfig(
                 enabled=True,
-                compress_stale=True,     # Safe: file was edited since read
-                compress_superseded=True, # Safe: file was re-read
-                min_size_bytes=512,       # Only compress reads > 512 bytes
+                compress_stale=False,    # DISABLED: Pi agents do read → edit → edit patterns
+                                        # where the read content is still needed for
+                                        # subsequent edits even after the first edit.
+                                        # The upstream default (compress_stale=True) is
+                                        # designed for Claude Code which re-reads between
+                                        # edits, but Pi agents don't always do that.
+                compress_superseded=True, # Safe: file was re-read (older read is redundant)
+                min_size_bytes=512,
             ),
         )
         router = ContentRouter(config)
