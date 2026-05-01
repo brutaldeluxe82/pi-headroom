@@ -622,20 +622,38 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	function refreshStatus(ctx: { ui: any }): void {
+	function refreshStatus(
+		ctx: { ui: any },
+		modelWindow?: number,
+	): void {
 		if (!headroomAvailable) {
 			ctx.ui.setStatus("headroom", undefined);
 			return;
 		}
 		const theme = ctx.ui.theme;
+		const currentTokens = stats.tokensBefore;
+
+		// Build threshold part: "42%/30%" or "3%/30%"
+		const thresholdPart =
+			modelWindow && modelWindow > 0
+				? theme.fg(
+						"dim",
+						` ${((currentTokens / modelWindow) * 100).toFixed(0)}%/${config.minTokensPct}%`,
+					)
+				: "";
+
 		if (stats.tokensSaved > 0) {
-			const pct =
-				stats.tokensBefore > 0 ? ((stats.tokensSaved / stats.tokensBefore) * 100).toFixed(0) : "0";
+			const savingsPct =
+				stats.tokensBefore > 0
+					? ((stats.tokensSaved / stats.tokensBefore) * 100).toFixed(0)
+					: "0";
 			const icon = theme.fg("success", "↓");
-			const text = theme.fg("dim", ` ${fmtTokens(stats.tokensSaved)} tok saved (${pct}%)`);
+			const text = theme.fg("dim", ` ${fmtTokens(stats.tokensSaved)} saved ${thresholdPart}`);
 			ctx.ui.setStatus("headroom", icon + text);
 		} else {
-			ctx.ui.setStatus("headroom", theme.fg("dim", "⌇ headroom"));
+			const icon = theme.fg("dim", "⌇");
+			const text = theme.fg("dim", ` headroom${thresholdPart}`);
+			ctx.ui.setStatus("headroom", icon + text);
 		}
 	}
 
@@ -718,7 +736,7 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 
-		refreshStatus(ctx);
+		refreshStatus(ctx, ctx.model?.contextWindow);
 	});
 
 	// -----------------------------------------------------------------------
@@ -788,7 +806,7 @@ export default function (pi: ExtensionAPI) {
 			if (tokensSaved <= 0) return;
 
 			recordCompression(result.tokens_before, result.tokens_after, result.transforms_applied ?? []);
-			refreshStatus(ctx);
+			refreshStatus(ctx, ctx.model?.contextWindow);
 
 			// Apply compressed messages back to Pi format
 			const compressedMessages = result.messages as Record<string, unknown>[];
@@ -965,7 +983,7 @@ export default function (pi: ExtensionAPI) {
 			if (sub === "toggle") {
 				autoCompress = !autoCompress;
 				ctx.ui.notify(`Headroom auto-compression: ${autoCompress ? "ON" : "OFF"}`, "info");
-				refreshStatus(ctx);
+				refreshStatus(ctx, ctx.model?.contextWindow);
 				return;
 			}
 
@@ -976,7 +994,7 @@ export default function (pi: ExtensionAPI) {
 					`Headroom config reloaded | auto=${autoCompress ? "on" : "off"} | threshold=${config.minTokensPct}%`,
 					"info",
 				);
-				refreshStatus(ctx);
+				refreshStatus(ctx, ctx.model?.contextWindow);
 				return;
 			}
 
@@ -1017,7 +1035,7 @@ export default function (pi: ExtensionAPI) {
 						ctx.ui.notify("Headroom installed but verification failed", "warning");
 					}
 				}
-				refreshStatus(ctx);
+				refreshStatus(ctx, ctx.model?.contextWindow);
 				return;
 			}
 
